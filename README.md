@@ -38,7 +38,7 @@ sudo CONTENT_BLOCKER_URL=https://raw.githubusercontent.com/StevenBlack/hosts/mas
 - Peer changes reload with `wg syncconf` instead of `wg addconf`.
 
 **Tunnel and clients** (ideas from angristan/wireguard-install)
-- Default tunnel subnets are `10.77.77.0/24` and `fd42:42:42::0/64` instead of all of `10.0.0.0/8`, so they don't collide with Docker, home/work LANs or other tunnels. Room for 253 peers; adding one more stops with a clear error instead of the old "roll over" logic that handed out addresses outside the subnet.
+- Default tunnel subnets are `10.77.77.0/24` and `fd77:77:77::0/64` instead of all of `10.0.0.0/8`, so they don't collide with Docker, home/work LANs or other tunnels. Room for 253 peers; adding one more stops with a clear error instead of the old "roll over" logic that handed out addresses outside the subnet.
 - Client configs use `Address = <ip>/32, <ip6>/128`. With the old `/8` a client lost access to any local network in the 10.x range.
 - Client configs no longer force `MTU = 1280` (each device uses WireGuard's default; a commented line explains when to lower it). A custom peer MTU chosen at install is still written.
 - Client configs no longer get a random `ListenPort`.
