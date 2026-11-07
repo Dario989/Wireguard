@@ -325,6 +325,8 @@ WIREGUARD_PUB_NIC="${WIREGUARD_PUB_NIC:-wg0}"
 WIREGUARD_CONFIG="${WIREGUARD_PATH}/${WIREGUARD_PUB_NIC}.conf"
 # Assigns a path for the WireGuard additional peer configuration file
 WIREGUARD_ADD_PEER_CONFIG="${WIREGUARD_PATH}/${WIREGUARD_PUB_NIC}-add-peer.conf"
+# Sysctl drop-in that keeps IP forwarding enabled for the tunnel
+WIREGUARD_SYSCTL_CONFIG="/etc/sysctl.d/99-wireguard-manager.conf"
 # Assigns a path for system backups
 SYSTEM_BACKUP_PATH="/var/backups"
 # Assigns a path for the WireGuard configuration backup file
@@ -1387,8 +1389,8 @@ if [ ! -f "${WIREGUARD_CONFIG}" ]; then
       NFTABLES_POSTDOWN="${NFTABLES_POSTDOWN}; ip6tables -D FORWARD -i ${WIREGUARD_PUB_NIC} -j ACCEPT; ip6tables -D FORWARD -o ${WIREGUARD_PUB_NIC} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT"
     fi
     # Enable forwarding persistently instead of toggling it host-wide on every up/down.
-    printf 'net.ipv4.ip_forward = 1\nnet.ipv6.conf.all.forwarding = 1\n' >/etc/sysctl.d/99-wireguard-manager.conf
-    sysctl --load=/etc/sysctl.d/99-wireguard-manager.conf
+    printf 'net.ipv4.ip_forward = 1\nnet.ipv6.conf.all.forwarding = 1\n' >"${WIREGUARD_SYSCTL_CONFIG}"
+    sysctl --load="${WIREGUARD_SYSCTL_CONFIG}"
     # Create server WireGuard configuration file
     echo "# ${PRIVATE_SUBNET_V4} ${PRIVATE_SUBNET_V6} ${SERVER_HOST}:${SERVER_PORT} ${SERVER_PUBKEY} ${CLIENT_DNS} ${PEER_MTU_CHOICE} ${NAT_CHOICE} ${CLIENT_ALLOWED_IP}
 [Interface]
@@ -1799,6 +1801,12 @@ PublicKey = ${SERVER_PUBKEY}" >>${WIREGUARD_CLIENT_PATH}/"${NEW_CLIENT_NAME}".co
       # For Oracle Linux distribution
       elif [ "${CURRENT_DISTRO}" == "ol" ]; then
         yum remove wireguard qrencode -y
+      fi
+      # Remove the forwarding drop-in. Runtime forwarding is left as is so Docker or other
+      # tunnels on this host keep working; it returns to the system default on the next reboot.
+      if [ -f "${WIREGUARD_SYSCTL_CONFIG}" ]; then
+        rm --force "${WIREGUARD_SYSCTL_CONFIG}"
+        echo "Removed ${WIREGUARD_SYSCTL_CONFIG}."
       fi
       # Delete WireGuard backup
       if [ -f "${WIREGUARD_CONFIG_BACKUP}" ]; then

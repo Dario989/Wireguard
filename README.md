@@ -32,7 +32,7 @@ sudo CONTENT_BLOCKER_URL=https://raw.githubusercontent.com/StevenBlack/hosts/mas
 - `nftables.service` is no longer enabled (Debian's `/etc/nftables.conf` runs `flush ruleset`, wiping iptables-nft, fail2ban and ipset rules).
 
 **Networking**
-- IP forwarding is set once in `/etc/sysctl.d/99-wireguard-manager.conf` instead of being turned off host-wide on `wg-quick down`.
+- IP forwarding is set once in `/etc/sysctl.d/99-wireguard-manager.conf` instead of being turned off host-wide on `wg-quick down`. Uninstall removes that file again (runtime forwarding is left on until the next reboot so Docker or other tunnels aren't cut off).
 - PostUp/PostDown add `FORWARD` accept rules (iptables/ip6tables) so clients work on hosts with a DROP forward policy (Docker, ufw).
 - Interface name overridable via `WIREGUARD_PUB_NIC`.
 - Peer changes reload with `wg syncconf` instead of `wg addconf`.
