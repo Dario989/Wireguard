@@ -44,6 +44,10 @@ sudo CONTENT_BLOCKER_URL=https://raw.githubusercontent.com/StevenBlack/hosts/mas
 - `cache-min-ttl` 86400 → 0 (records were cached for at least a day).
 - `access-control: ::0` → `::/0`.
 
+**Peers**
+- Client configs are saved as `/etc/wireguard/clients/<peer>.conf` instead of `<peer>-wg0.conf`. Files from older versions are renamed automatically on the next run. A non-default interface (`WIREGUARD_PUB_NIC=wg1`) uses its own folder, `clients-wg1/`, so peer names can't collide.
+- Default peer names are `peer1`, `peer2`, ... (next free number) instead of a random 50-character hex string.
+
 **Fixes**
 - `--help` exits instead of starting the installer.
 - Requirement check uses `crontab` (no `cron` binary on Arch/Fedora) and drops the unused `ifup`; `PATH` includes `/usr/sbin` so nightly cron runs don't reinstall packages.

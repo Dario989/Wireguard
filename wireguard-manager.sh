@@ -58,6 +58,15 @@ function validate-peer-name() {
   fi
 }
 
+# Suggest the next free default peer name: peer1, peer2, ...
+function next-peer-name() {
+  local n=1
+  while grep --quiet "^# peer${n} start$" "${WIREGUARD_CONFIG}" 2>/dev/null || [ -e "${WIREGUARD_CLIENT_PATH}/peer${n}.conf" ]; do
+    n=$((n + 1))
+  done
+  echo "peer${n}"
+}
+
 # Try each URL in order and print the first non-empty response to stdout.
 function fetch-first() {
   local url body
@@ -304,7 +313,12 @@ WIREGUARD_WEBSITE_URL="https://www.wireguard.com"
 # Assigns a path for WireGuard
 WIREGUARD_PATH="/etc/wireguard"
 # Assigns a path for WireGuard clients
-WIREGUARD_CLIENT_PATH="${WIREGUARD_PATH}/clients"
+# Client configs are named <peer>.conf; a non-default interface gets its own folder so names can't collide
+if [ "${WIREGUARD_PUB_NIC}" == "wg0" ]; then
+  WIREGUARD_CLIENT_PATH="${WIREGUARD_PATH}/clients"
+else
+  WIREGUARD_CLIENT_PATH="${WIREGUARD_PATH}/clients-${WIREGUARD_PUB_NIC}"
+fi
 # Assigns a public network interface name for WireGuard
 WIREGUARD_PUB_NIC="${WIREGUARD_PUB_NIC:-wg0}"
 # Assigns a path for the WireGuard configuration file
@@ -502,7 +516,7 @@ function headless-install() {
     AUTOMATIC_BACKUP_SETTINGS=${AUTOMATIC_BACKUP_SETTINGS=1}   # Default to 1 if not specified
     DNS_PROVIDER_SETTINGS=${DNS_PROVIDER_SETTINGS=1}           # Default to 1 if not specified
     CONTENT_BLOCKER_SETTINGS=${CONTENT_BLOCKER_SETTINGS=1}     # Default to 1 if not specified
-    CLIENT_NAME=${CLIENT_NAME=$(openssl rand -hex 25)}         # Generate a random client name if not specified
+    CLIENT_NAME=${CLIENT_NAME=$(next-peer-name)}              # Default peer1, peer2, ... if not specified
     AUTOMATIC_CONFIG_REMOVER=${AUTOMATIC_CONFIG_REMOVER=1}     # Default to 1 if not specified
   fi
 }
@@ -1081,11 +1095,11 @@ if [ ! -f "${WIREGUARD_CONFIG}" ]; then
       # Display naming rules to the user.
       echo "Please provide a name for the WireGuard Peer. The name should be a single word, without special characters or spaces."
       # Read the user's input, offering a random string as the default name.
-      read -rp "Client name:" -e -i "$(openssl rand -hex 25)" CLIENT_NAME
+      read -rp "Client name:" -e -i "$(next-peer-name)" CLIENT_NAME
     fi
     # If no name is provided by the user, assign a random string as the name.
     if [ -z "${CLIENT_NAME}" ]; then
-      CLIENT_NAME="$(openssl rand -hex 25)"
+      CLIENT_NAME="$(next-peer-name)"
     fi
     validate-peer-name "${CLIENT_NAME}"
   }
@@ -1450,7 +1464,7 @@ AllowedIPs = ${CLIENT_ALLOWED_IP}
 Endpoint = ${SERVER_HOST}:${SERVER_PORT}
 PersistentKeepalive = ${NAT_CHOICE}
 PresharedKey = ${PRESHARED_KEY}
-PublicKey = ${SERVER_PUBKEY}" >>${WIREGUARD_CLIENT_PATH}/"${CLIENT_NAME}"-${WIREGUARD_PUB_NIC}.conf
+PublicKey = ${SERVER_PUBKEY}" >>${WIREGUARD_CLIENT_PATH}/"${CLIENT_NAME}".conf
     # Update ownership of the WireGuard configuration directory to root
     chown --recursive root:root ${WIREGUARD_PATH}
     # Apply appropriate permissions to the WireGuard configuration directory
@@ -1478,11 +1492,11 @@ PublicKey = ${SERVER_PUBKEY}" >>${WIREGUARD_CLIENT_PATH}/"${CLIENT_NAME}"-${WIRE
       fi
     fi
     # Create a QR code for the client configuration for easy scanning
-    qrencode -t ansiutf8 <${WIREGUARD_CLIENT_PATH}/"${CLIENT_NAME}"-${WIREGUARD_PUB_NIC}.conf
+    qrencode -t ansiutf8 <${WIREGUARD_CLIENT_PATH}/"${CLIENT_NAME}".conf
     # Display the client configuration details in the terminal
-    cat ${WIREGUARD_CLIENT_PATH}/"${CLIENT_NAME}"-${WIREGUARD_PUB_NIC}.conf
+    cat ${WIREGUARD_CLIENT_PATH}/"${CLIENT_NAME}".conf
     # Show the path where the client configuration file is stored
-    echo "Client Config --> ${WIREGUARD_CLIENT_PATH}/${CLIENT_NAME}-${WIREGUARD_PUB_NIC}.conf"
+    echo "Client Config --> ${WIREGUARD_CLIENT_PATH}/${CLIENT_NAME}.conf"
   }
 
   # Configuring WireGuard settings
@@ -1490,6 +1504,15 @@ PublicKey = ${SERVER_PUBKEY}" >>${WIREGUARD_CLIENT_PATH}/"${CLIENT_NAME}"-${WIRE
 
 # After WireGuard Install
 else
+
+  # Older versions named client configs <peer>-<interface>.conf; rename them to <peer>.conf once.
+  if [ -d "${WIREGUARD_CLIENT_PATH}" ]; then
+    for OLD_CLIENT_FILE in "${WIREGUARD_CLIENT_PATH}"/*-"${WIREGUARD_PUB_NIC}".conf; do
+      [ -f "${OLD_CLIENT_FILE}" ] || continue
+      NEW_CLIENT_FILE="${OLD_CLIENT_FILE%-"${WIREGUARD_PUB_NIC}".conf}.conf"
+      [ -e "${NEW_CLIENT_FILE}" ] || mv "${OLD_CLIENT_FILE}" "${NEW_CLIENT_FILE}"
+    done
+  fi
 
   # What to do if the software is already installed?
   function wireguard-next-questions-interface() {
@@ -1536,11 +1559,11 @@ else
       # If a client name isn't supplied, the script will request one
       if [ -z "${NEW_CLIENT_NAME}" ]; then
         echo "Let's name the WireGuard Peer. Use one word only, no special characters, no spaces."
-        read -rp "New client peer:" -e -i "$(openssl rand -hex 25)" NEW_CLIENT_NAME
+        read -rp "New client peer:" -e -i "$(next-peer-name)" NEW_CLIENT_NAME
       fi
       # If no client name is provided, use openssl to generate a random name
       if [ -z "${NEW_CLIENT_NAME}" ]; then
-        NEW_CLIENT_NAME="$(openssl rand -hex 25)"
+        NEW_CLIENT_NAME="$(next-peer-name)"
       fi
       validate-peer-name "${NEW_CLIENT_NAME}"
       if grep -q "^# ${NEW_CLIENT_NAME} start$" "${WIREGUARD_CONFIG}"; then
@@ -1690,7 +1713,7 @@ AllowedIPs = ${CLIENT_ALLOWED_IP}
 Endpoint = ${SERVER_HOST}
 PersistentKeepalive = ${NAT_CHOICE}
 PresharedKey = ${PRESHARED_KEY}
-PublicKey = ${SERVER_PUBKEY}" >>${WIREGUARD_CLIENT_PATH}/"${NEW_CLIENT_NAME}"-${WIREGUARD_PUB_NIC}.conf
+PublicKey = ${SERVER_PUBKEY}" >>${WIREGUARD_CLIENT_PATH}/"${NEW_CLIENT_NAME}".conf
       # Add the WireGuard interface configuration, stripping any unnecessary fields
       wg syncconf ${WIREGUARD_PUB_NIC} <(wg-quick strip ${WIREGUARD_PUB_NIC})
       # Check if automatic WireGuard expiration is enabled, and if so, set the expiration date
@@ -1702,11 +1725,11 @@ PublicKey = ${SERVER_PUBKEY}" >>${WIREGUARD_CLIENT_PATH}/"${NEW_CLIENT_NAME}"-${
         } | crontab -
       fi
       # Generate and display a QR code for the new client configuration
-      qrencode -t ansiutf8 <${WIREGUARD_CLIENT_PATH}/"${NEW_CLIENT_NAME}"-${WIREGUARD_PUB_NIC}.conf
+      qrencode -t ansiutf8 <${WIREGUARD_CLIENT_PATH}/"${NEW_CLIENT_NAME}".conf
       # Output the new client configuration file content
-      cat ${WIREGUARD_CLIENT_PATH}/"${NEW_CLIENT_NAME}"-${WIREGUARD_PUB_NIC}.conf
+      cat ${WIREGUARD_CLIENT_PATH}/"${NEW_CLIENT_NAME}".conf
       # Display the path of the new client configuration file
-      echo "Client config --> ${WIREGUARD_CLIENT_PATH}/${NEW_CLIENT_NAME}-${WIREGUARD_PUB_NIC}.conf"
+      echo "Client config --> ${WIREGUARD_CLIENT_PATH}/${NEW_CLIENT_NAME}.conf"
       ;;
     6) # Remove WireGuard Peer
       # Prompt the user to choose a WireGuard peer to remove
@@ -1727,8 +1750,8 @@ PublicKey = ${SERVER_PUBKEY}" >>${WIREGUARD_CLIENT_PATH}/"${NEW_CLIENT_NAME}"-${
       # Remove the selected peer's configuration block from the WireGuard configuration file
       sed --in-place "/\# ${REMOVECLIENT} start/,/\# ${REMOVECLIENT} end/d" ${WIREGUARD_CONFIG}
       # If the selected peer has a configuration file in the client path, remove it
-      if [ -f "${WIREGUARD_CLIENT_PATH}/${REMOVECLIENT}-${WIREGUARD_PUB_NIC}.conf" ]; then
-        rm --force ${WIREGUARD_CLIENT_PATH}/"${REMOVECLIENT}"-${WIREGUARD_PUB_NIC}.conf
+      if [ -f "${WIREGUARD_CLIENT_PATH}/${REMOVECLIENT}.conf" ]; then
+        rm --force ${WIREGUARD_CLIENT_PATH}/"${REMOVECLIENT}".conf
       fi
       # Reload the WireGuard interface configuration to apply the changes
       wg syncconf ${WIREGUARD_PUB_NIC} <(wg-quick strip ${WIREGUARD_PUB_NIC})
@@ -2004,9 +2027,9 @@ PublicKey = ${SERVER_PUBKEY}" >>${WIREGUARD_CLIENT_PATH}/"${NEW_CLIENT_NAME}"-${
       # Loop through the clients in the USER_LIST array
       for CLIENT_NAME in "${USER_LIST[@]}"; do
         # Check if the client's config file exists
-        if [ -f "${WIREGUARD_CLIENT_PATH}/${CLIENT_NAME}-${WIREGUARD_PUB_NIC}.conf" ]; then
+        if [ -f "${WIREGUARD_CLIENT_PATH}/${CLIENT_NAME}.conf" ]; then
           # Update the server host in the client's config file
-          sed --in-place "s|^Endpoint = ${OLD_SERVER_HOST//./\\.}|Endpoint = ${NEW_SERVER_HOST}|; s|^Endpoint = \\[${OLD_SERVER_HOST}\\]|Endpoint = [${NEW_SERVER_HOST}]|" "${WIREGUARD_CLIENT_PATH}/${CLIENT_NAME}-${WIREGUARD_PUB_NIC}.conf"
+          sed --in-place "s|^Endpoint = ${OLD_SERVER_HOST//./\\.}|Endpoint = ${NEW_SERVER_HOST}|; s|^Endpoint = \\[${OLD_SERVER_HOST}\\]|Endpoint = [${NEW_SERVER_HOST}]|" "${WIREGUARD_CLIENT_PATH}/${CLIENT_NAME}.conf"
         fi
       done
       ;;
@@ -2038,10 +2061,10 @@ PublicKey = ${SERVER_PUBKEY}" >>${WIREGUARD_CLIENT_PATH}/"${NEW_CLIENT_NAME}"-${
       # Loop through the clients in the USER_LIST array
       for CLIENT_NAME in "${USER_LIST[@]}"; do
         # Check if the client's config file exists
-        if [ -f "${WIREGUARD_CLIENT_PATH}/${CLIENT_NAME}-${WIREGUARD_PUB_NIC}.conf" ]; then
+        if [ -f "${WIREGUARD_CLIENT_PATH}/${CLIENT_NAME}.conf" ]; then
           # Update the server port in the client's config file
-          sed --in-place "s/^\\(Endpoint = .*\\):${OLD_SERVER_PORT}$/\\1:${NEW_SERVER_PORT}/" "${WIREGUARD_CLIENT_PATH}/${CLIENT_NAME}-${WIREGUARD_PUB_NIC}.conf"
-          echo "The server port has changed from ${OLD_SERVER_PORT} to ${NEW_SERVER_PORT} in ${WIREGUARD_CLIENT_PATH}/${CLIENT_NAME}-${WIREGUARD_PUB_NIC}.conf."
+          sed --in-place "s/^\\(Endpoint = .*\\):${OLD_SERVER_PORT}$/\\1:${NEW_SERVER_PORT}/" "${WIREGUARD_CLIENT_PATH}/${CLIENT_NAME}.conf"
+          echo "The server port has changed from ${OLD_SERVER_PORT} to ${NEW_SERVER_PORT} in ${WIREGUARD_CLIENT_PATH}/${CLIENT_NAME}.conf."
         fi
       done
       # Apply the new ListenPort
@@ -2066,8 +2089,8 @@ PublicKey = ${SERVER_PUBKEY}" >>${WIREGUARD_CLIENT_PATH}/"${NEW_CLIENT_NAME}"-${
         # This line removes the client from the server.
         sed --in-place "/\# ${CLIENT_NAME} start/,/\# ${CLIENT_NAME} end/d" ${WIREGUARD_CONFIG}
         # This line removes the client's config from the server.
-        if [ -f "${WIREGUARD_CLIENT_PATH}/${CLIENT_NAME}-${WIREGUARD_PUB_NIC}.conf" ]; then
-          rm --force ${WIREGUARD_CLIENT_PATH}/"${CLIENT_NAME}"-${WIREGUARD_PUB_NIC}.conf
+        if [ -f "${WIREGUARD_CLIENT_PATH}/${CLIENT_NAME}.conf" ]; then
+          rm --force ${WIREGUARD_CLIENT_PATH}/"${CLIENT_NAME}".conf
         else
           echo "The client config file for ${CLIENT_NAME} does not exist."
         fi
@@ -2086,11 +2109,11 @@ PublicKey = ${SERVER_PUBKEY}" >>${WIREGUARD_CLIENT_PATH}/"${NEW_CLIENT_NAME}"-${
       # Prompt the user to enter the desired peer's name and store it in the VIEW_CLIENT_INFO variable
       read -rp "Enter the name of the peer you want to view information for: " VIEW_CLIENT_INFO
       # Check if the config file for the specified peer exists
-      if [ -f "${WIREGUARD_CLIENT_PATH}/${VIEW_CLIENT_INFO}-${WIREGUARD_PUB_NIC}.conf" ]; then
+      if [ -f "${WIREGUARD_CLIENT_PATH}/${VIEW_CLIENT_INFO}.conf" ]; then
         # Generate a QR code for the specified peer's config file and display it in the terminal
-        qrencode -t ansiutf8 <${WIREGUARD_CLIENT_PATH}/"${VIEW_CLIENT_INFO}"-${WIREGUARD_PUB_NIC}.conf
+        qrencode -t ansiutf8 <${WIREGUARD_CLIENT_PATH}/"${VIEW_CLIENT_INFO}".conf
         # Print the file path of the specified peer's config file
-        echo "Peer's config --> ${WIREGUARD_CLIENT_PATH}/${VIEW_CLIENT_INFO}-${WIREGUARD_PUB_NIC}.conf"
+        echo "Peer's config --> ${WIREGUARD_CLIENT_PATH}/${VIEW_CLIENT_INFO}.conf"
       else
         # If the config file for the specified peer does not exist, print an error message
         echo "Error: The peer you specified could not be found. Please ensure you've entered the correct information."
