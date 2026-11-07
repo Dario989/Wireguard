@@ -31,6 +31,7 @@ wireguard-manager.sh --qr phone        # show a peer's QR code and config path
 wireguard-manager.sh --list            # list peers with their tunnel addresses
 wireguard-manager.sh --show            # live status (wg show)
 wireguard-manager.sh --purge -y        # remove all peers without asking
+wireguard-manager.sh --doctor          # health check: interface, port, forwarding, NAT, firewall, DNS, peers
 wireguard-manager.sh --help            # all options
 ```
 
@@ -61,6 +62,11 @@ Peer names: 1–15 letters, digits, `-` or `_`. Linux clients use the file name 
 - The listen port is opened in iptables/ip6tables `INPUT` in PostUp and closed in PostDown, so a DROP input policy or geoblock rules don't silently block clients. Changing the port (option 13) stops the interface first so the old rule is removed, then starts it on the new port.
 - After install the script checks the tunnel is actually up and tells you what to do if not (usually a reboot after a kernel update).
 - New peers take the lowest free address from `.2` up and never reuse one in use (the last line of `wg0.conf` was taken as the highest address, which broke after a gap was filled).
+
+**From pirate/wireguard-docs**
+- No forced server MTU: `wg-quick` derives it from the route (route MTU − 80), which is right on PPPoE, DS-Lite or small-MTU VPS links too. A custom MTU is still possible.
+- Peer isolation (default): an install question decides whether peers may reach each other through the server. Isolated means a `wg0 → wg0` DROP rule in FORWARD (iptables and ip6tables); clients still reach the internet and the server itself. Headless: `PEER_ISOLATION_SETTINGS=2` to allow peer-to-peer.
+- `--doctor` (menu option 16, replaces the old "Verify") checks: interface up and listen port, IPv4/IPv6 forwarding, NAT table, INPUT/FORWARD rules against DROP policies, peer isolation, host DNS, Unbound (running, config, DNSSEC), whether the client endpoint still matches the server's public IP, and each peer's last handshake by name. Exits 1 if anything failed, so it works in monitoring scripts.
 
 **Server address**
 - Public IP detection checks the server's own interfaces first (Nyr-style). One public address is used directly; several give you a menu; only private/CGNAT addresses mean the server is behind NAT, and then the address found online is offered as an editable default, where a hostname works too. Outside lookups are validated, so an empty or garbage reply is never used.

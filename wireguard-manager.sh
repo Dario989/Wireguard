@@ -106,6 +106,158 @@ function is-private-ipv4() {
   [[ "${1}" =~ ^(10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.) ]]
 }
 
+# Health check for --doctor / menu option 16. Prints OK/WARN/FAIL lines; returns 1 if anything failed.
+function run-diagnostics() {
+  local failures=0 warnings=0 port host now key ts age name peers_total=0 peers_recent=0 interface_up=false
+  local -A peer_names=()
+  diag-ok() { echo "  [ OK ] $*"; }
+  diag-info() { echo "  [INFO] $*"; }
+  diag-warn() {
+    echo "  [WARN] $*"
+    warnings=$((warnings + 1))
+  }
+  diag-fail() {
+    echo "  [FAIL] $*"
+    failures=$((failures + 1))
+  }
+  echo "WireGuard diagnostics for ${WIREGUARD_PUB_NIC}"
+
+  # Interface and port
+  if wg show "${WIREGUARD_PUB_NIC}" >/dev/null 2>&1; then
+    diag-ok "Interface ${WIREGUARD_PUB_NIC} is up"
+    interface_up=true
+    port=$(wg show "${WIREGUARD_PUB_NIC}" listen-port 2>/dev/null)
+  else
+    diag-fail "Interface ${WIREGUARD_PUB_NIC} is down (check: systemctl status wg-quick@${WIREGUARD_PUB_NIC})"
+  fi
+  if [ -z "${port}" ]; then
+    port=$(awk -F' = ' '/^ListenPort/ {print $2; exit}' "${WIREGUARD_CONFIG}")
+  fi
+  if [ -n "${port}" ] && [ "${port}" != "0" ] && [ "${interface_up}" == true ]; then
+    diag-ok "Listening on UDP port ${port}"
+  elif [ -n "${port}" ] && [ "${port}" != "0" ]; then
+    diag-info "Configured UDP port ${port} (not listening while the interface is down)"
+  else
+    diag-fail "No listen port configured"
+  fi
+
+  # Forwarding
+  if [ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null)" == "1" ]; then
+    diag-ok "IPv4 forwarding is on"
+  else
+    diag-fail "IPv4 forwarding is off (sysctl --load=${WIREGUARD_SYSCTL_CONFIG})"
+  fi
+  if [ "$(sysctl -n net.ipv6.conf.all.forwarding 2>/dev/null)" != "1" ]; then
+    diag-warn "IPv6 forwarding is off, IPv6 through the tunnel won't work"
+  fi
+
+  # NAT and firewall
+  if nft list table inet "wireguard-${WIREGUARD_PUB_NIC}" >/dev/null 2>&1; then
+    diag-ok "NAT table wireguard-${WIREGUARD_PUB_NIC} is loaded"
+  else
+    diag-fail "NAT table wireguard-${WIREGUARD_PUB_NIC} is missing, clients will have no internet"
+  fi
+  if [ -x "$(command -v iptables)" ]; then
+    if [ -n "${port}" ] && iptables -w 5 -C INPUT -p udp --dport "${port}" -j ACCEPT 2>/dev/null; then
+      diag-ok "Firewall allows UDP ${port} in"
+    elif iptables -w 5 -S INPUT 2>/dev/null | grep --quiet '^-P INPUT DROP'; then
+      diag-fail "INPUT policy is DROP and there is no rule for UDP ${port}, clients can't connect"
+    else
+      diag-warn "No INPUT rule for UDP ${port} (fine while the INPUT policy is ACCEPT)"
+    fi
+    if iptables -w 5 -C FORWARD -i "${WIREGUARD_PUB_NIC}" -j ACCEPT 2>/dev/null; then
+      diag-ok "Forwarding from ${WIREGUARD_PUB_NIC} is allowed"
+    elif iptables -w 5 -S FORWARD 2>/dev/null | grep --quiet '^-P FORWARD DROP'; then
+      diag-fail "FORWARD policy is DROP and there is no ACCEPT rule for ${WIREGUARD_PUB_NIC}"
+    fi
+    if iptables -w 5 -C FORWARD -i "${WIREGUARD_PUB_NIC}" -o "${WIREGUARD_PUB_NIC}" -j DROP 2>/dev/null; then
+      diag-info "Peers are isolated from each other"
+    else
+      diag-info "Peers can reach each other"
+    fi
+  fi
+
+  # DNS
+  if getent hosts wireguard.com >/dev/null 2>&1; then
+    diag-ok "This server can resolve DNS names"
+  else
+    diag-fail "This server can't resolve DNS names"
+  fi
+  if [ -x "$(command -v unbound)" ] && [ -f "${UNBOUND_CONFIG}" ]; then
+    if systemctl is-active --quiet unbound 2>/dev/null || pgrep -x unbound >/dev/null; then
+      diag-ok "Unbound is running"
+    else
+      diag-fail "Unbound is not running (clients using it have no DNS)"
+    fi
+    if unbound-checkconf "${UNBOUND_CONFIG}" >/dev/null 2>&1; then
+      diag-ok "Unbound config is valid"
+    else
+      diag-fail "Unbound config has errors (run: unbound-checkconf ${UNBOUND_CONFIG})"
+    fi
+    if [[ "$(unbound-host -C "${UNBOUND_CONFIG}" -v cloudflare.com 2>/dev/null)" == *"secure"* ]]; then
+      diag-ok "Unbound DNSSEC validation works"
+    else
+      diag-warn "Unbound DNSSEC validation failed for cloudflare.com"
+    fi
+  fi
+
+  # Endpoint the clients use
+  host=$(head --lines=1 "${WIREGUARD_CONFIG}" | cut --delimiter=" " --fields=4)
+  host="${host%:*}"
+  host="${host#[}"
+  host="${host%]}"
+  if is-ipv4 "${host}" || is-ipv6 "${host}"; then
+    get-network-information
+    if [ "${host}" == "${DEFAULT_INTERFACE_IPV4}" ] || [ "${host}" == "${DEFAULT_INTERFACE_IPV6}" ] || [[ " ${LOCAL_PUBLIC_IPV4_LIST[*]} ${LOCAL_PUBLIC_IPV6_LIST[*]} " == *" ${host} "* ]]; then
+      diag-ok "Client endpoint ${host} matches this server's public address"
+    elif [ -n "${DEFAULT_INTERFACE_IPV4}${DEFAULT_INTERFACE_IPV6}" ]; then
+      diag-warn "Client endpoint ${host} differs from the detected public address ${DEFAULT_INTERFACE_IPV4:-${DEFAULT_INTERFACE_IPV6}} (run --ddns if the IP changed)"
+    fi
+  elif [ -n "${host}" ]; then
+    if getent hosts "${host}" >/dev/null 2>&1; then
+      diag-ok "Client endpoint hostname ${host} resolves"
+    else
+      diag-fail "Client endpoint hostname ${host} does not resolve"
+    fi
+  fi
+
+  # Peers and their last handshake
+  while read -r key name; do
+    peer_names["${key}"]="${name}"
+  done < <(awk '/^# .* start$/ { name = $2 } /^PublicKey/ && name != "" { print $3, name; name = "" }' "${WIREGUARD_CONFIG}")
+  now=$(date +%s)
+  echo "Peers (last handshake):"
+  while read -r key ts; do
+    [ -n "${key}" ] || continue
+    peers_total=$((peers_total + 1))
+    name="${peer_names[${key}]:-${key:0:12}...}"
+    if [ "${ts}" == "0" ]; then
+      echo "    ${name}: never connected"
+      continue
+    fi
+    age=$((now - ts))
+    if [ "${age}" -lt 180 ]; then
+      peers_recent=$((peers_recent + 1))
+    fi
+    if [ "${age}" -lt 120 ]; then
+      echo "    ${name}: ${age} s ago"
+    elif [ "${age}" -lt 7200 ]; then
+      echo "    ${name}: $((age / 60)) min ago"
+    elif [ "${age}" -lt 172800 ]; then
+      echo "    ${name}: $((age / 3600)) h ago"
+    else
+      echo "    ${name}: $((age / 86400)) days ago"
+    fi
+  done < <(wg show "${WIREGUARD_PUB_NIC}" latest-handshakes 2>/dev/null)
+  if [ "${peers_total}" -eq 0 ]; then
+    echo "    (none)"
+  fi
+  diag-info "${peers_recent} of ${peers_total} peers connected in the last 3 minutes"
+
+  echo "Result: ${failures} problem(s), ${warnings} warning(s)."
+  [ "${failures}" -eq 0 ]
+}
+
 # Suggest the next free default peer name: peer1, peer2, ...
 function next-peer-name() {
   local n=1
@@ -498,6 +650,7 @@ function usage-guide() {
   echo "  --backup               Creates a backup of your current WireGuard configuration"
   echo "  --restore              Restores the WireGuard configuration from a previous backup"
   echo "  --purge                Removes all peers from the WireGuard interface (asks first)"
+  echo "  --doctor               Checks the setup: interface, port, forwarding, NAT, firewall, DNS, peers"
   echo "  -y, --yes              Answers yes to confirmation questions (for scripts and cron)"
   echo "  --help                 Displays this usage guide"
   echo ""
@@ -558,6 +711,10 @@ function usage() {
         VIEW_CLIENT_INFO="${1}"
         shift
       fi
+      ;;
+    --doctor | --verify) # Health check
+      shift
+      WIREGUARD_OPTIONS=${WIREGUARD_OPTIONS=16}
       ;;
     -y | --yes) # Answer yes to confirmations
       shift
@@ -622,6 +779,7 @@ function headless-install() {
     MTU_CHOICE_SETTINGS=${MTU_CHOICE_SETTINGS=1}               # Default to 1 if not specified
     SERVER_HOST_SETTINGS=${SERVER_HOST_SETTINGS=1}             # Default to 1 if not specified
     CLIENT_ALLOWED_IP_SETTINGS=${CLIENT_ALLOWED_IP_SETTINGS=1} # Default to 1 if not specified
+    PEER_ISOLATION_SETTINGS=${PEER_ISOLATION_SETTINGS=1}       # Default to 1 (peers isolated) if not specified
     AUTOMATIC_UPDATES_SETTINGS=${AUTOMATIC_UPDATES_SETTINGS=2} # Default to 2 (off) if not specified
     AUTOMATIC_BACKUP_SETTINGS=${AUTOMATIC_BACKUP_SETTINGS=1}   # Default to 1 if not specified
     DNS_PROVIDER_SETTINGS=${DNS_PROVIDER_SETTINGS=1}           # Default to 1 (Cloudflare) if not specified
@@ -900,7 +1058,7 @@ if [ ! -f "${WIREGUARD_CONFIG}" ]; then
     # Ask the user to specify the MTU settings.
     echo "What MTU do you want to use?"
     # Provide the user with options for setting the MTU.
-    echo "  1) 1420 for Interface, automatic for Peers (Recommended)"
+    echo "  1) Automatic for the interface and peers (Recommended)"
     echo "  2) Custom (Advanced)"
     # Continue prompting the user until a valid option (1 or 2) is selected.
     until [[ "${MTU_CHOICE_SETTINGS}" =~ ^[1-2]$ ]]; do
@@ -910,8 +1068,8 @@ if [ ! -f "${WIREGUARD_CONFIG}" ]; then
     # Set the MTU variables based on the user's choice.
     case ${MTU_CHOICE_SETTINGS} in
     1)
-      # If the user chose the default option, set the Interface MTU to 1420 and Peer MTU to 1280.
-      INTERFACE_MTU_CHOICE="1420"
+      # "auto" leaves MTU out of the server config so wg-quick derives it from the route MTU.
+      INTERFACE_MTU_CHOICE="auto"
       # "auto" leaves MTU out of client configs so each device uses WireGuard's default.
       PEER_MTU_CHOICE="auto"
       ;;
@@ -1011,6 +1169,19 @@ if [ ! -f "${WIREGUARD_CONFIG}" ]; then
 
   # Invoke the client-allowed-ip function to configure the type of traffic the client is allowed to forward.
   client-allowed-ip
+
+  # Function to decide whether peers may reach each other through the server.
+  function peer-isolation() {
+    echo "Should peers be able to reach each other through the VPN (e.g. phone to laptop)?"
+    echo "  1) No, isolate peers (Recommended)"
+    echo "  2) Yes, allow peer-to-peer traffic"
+    until [[ "${PEER_ISOLATION_SETTINGS}" =~ ^[1-2]$ ]]; do
+      read -rp "Peer-to-peer [1-2]:" -e -i 1 PEER_ISOLATION_SETTINGS
+    done
+  }
+
+  # Invoke the peer-isolation function.
+  peer-isolation
 
   # Function to configure automatic updates
   function enable-automatic-updates() {
@@ -1534,15 +1705,34 @@ if [ ! -f "${WIREGUARD_CONFIG}" ]; then
       NFTABLES_POSTUP="${NFTABLES_POSTUP}; ip6tables -w 5 -I INPUT -p udp --dport ${SERVER_PORT} -j ACCEPT; ip6tables -w 5 -I FORWARD -i ${WIREGUARD_PUB_NIC} -j ACCEPT; ip6tables -w 5 -I FORWARD -o ${WIREGUARD_PUB_NIC} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT"
       NFTABLES_POSTDOWN="${NFTABLES_POSTDOWN}; ip6tables -w 5 -D INPUT -p udp --dport ${SERVER_PORT} -j ACCEPT; ip6tables -w 5 -D FORWARD -i ${WIREGUARD_PUB_NIC} -j ACCEPT; ip6tables -w 5 -D FORWARD -o ${WIREGUARD_PUB_NIC} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT"
     fi
+    # Peer isolation: drop wg -> wg forwarding. Added last, so -I puts it above the ACCEPT rules.
+    if [ "${PEER_ISOLATION_SETTINGS}" == 1 ]; then
+      if [ -x "$(command -v iptables)" ]; then
+        NFTABLES_POSTUP="${NFTABLES_POSTUP}; iptables -w 5 -I FORWARD -i ${WIREGUARD_PUB_NIC} -o ${WIREGUARD_PUB_NIC} -j DROP"
+        NFTABLES_POSTDOWN="${NFTABLES_POSTDOWN}; iptables -w 5 -D FORWARD -i ${WIREGUARD_PUB_NIC} -o ${WIREGUARD_PUB_NIC} -j DROP"
+      else
+        echo "Warning: iptables not found, peers can't be isolated from each other."
+      fi
+      if [ -x "$(command -v ip6tables)" ]; then
+        NFTABLES_POSTUP="${NFTABLES_POSTUP}; ip6tables -w 5 -I FORWARD -i ${WIREGUARD_PUB_NIC} -o ${WIREGUARD_PUB_NIC} -j DROP"
+        NFTABLES_POSTDOWN="${NFTABLES_POSTDOWN}; ip6tables -w 5 -D FORWARD -i ${WIREGUARD_PUB_NIC} -o ${WIREGUARD_PUB_NIC} -j DROP"
+      fi
+    fi
     # Enable forwarding persistently instead of toggling it host-wide on every up/down.
     printf 'net.ipv4.ip_forward = 1\nnet.ipv6.conf.all.forwarding = 1\n' >"${WIREGUARD_SYSCTL_CONFIG}"
     sysctl --load="${WIREGUARD_SYSCTL_CONFIG}"
+    # Server MTU: only set when a custom value was chosen; wg-quick otherwise uses route MTU - 80.
+    if [ "${INTERFACE_MTU_CHOICE}" == "auto" ]; then
+      SERVER_MTU_LINE="# MTU is set automatically by wg-quick (route MTU - 80)"
+    else
+      SERVER_MTU_LINE="MTU = ${INTERFACE_MTU_CHOICE}"
+    fi
     # Create server WireGuard configuration file
     echo "# ${PRIVATE_SUBNET_V4} ${PRIVATE_SUBNET_V6} ${SERVER_HOST}:${SERVER_PORT} ${SERVER_PUBKEY} ${CLIENT_DNS} ${PEER_MTU_CHOICE} ${NAT_CHOICE} ${CLIENT_ALLOWED_IP}
 [Interface]
 Address = ${GATEWAY_ADDRESS_V4}/${PRIVATE_SUBNET_MASK_V4},${GATEWAY_ADDRESS_V6}/${PRIVATE_SUBNET_MASK_V6}
 ListenPort = ${SERVER_PORT}
-MTU = ${INTERFACE_MTU_CHOICE}
+${SERVER_MTU_LINE}
 PrivateKey = ${SERVER_PRIVKEY}
 PostUp = ${NFTABLES_POSTUP}
 PostDown = ${NFTABLES_POSTDOWN}
@@ -1655,7 +1845,7 @@ else
     echo "   13) Update WireGuard interface port"
     echo "   14) Purge all WireGuard peers"
     echo "   15) Generate a QR code for WireGuard configuration"
-    echo "   16) Verify WireGuard configurations"
+    echo "   16) Diagnose WireGuard setup"
     echo "   17) List peers"
     until [[ "${WIREGUARD_OPTIONS}" =~ ^[0-9]+$ ]] && [ "${WIREGUARD_OPTIONS}" -ge 1 ] && [ "${WIREGUARD_OPTIONS}" -le 17 ]; do
       read -rp "Select an Option [1-17]:" -e -i 0 WIREGUARD_OPTIONS
@@ -2251,35 +2441,9 @@ PublicKey = ${SERVER_PUBKEY}" >>${WIREGUARD_CLIENT_PATH}/"${NEW_CLIENT_NAME}".co
         exit
       fi
       ;;
-    16)
-      # Check if the `unbound` command is available on the system by checking if it is executable
-      if [ -x "$(command -v unbound)" ]; then
-        # Check if the output of `unbound-checkconf` run on `UNBOUND_CONFIG` contains "no errors"
-        if [[ "$(unbound-checkconf ${UNBOUND_CONFIG})" != *"no errors"* ]]; then
-          # If "no errors" was not found in output of previous command, print an error message
-          unbound-checkconf ${UNBOUND_CONFIG}
-          echo "Error: We found an error on your unbound config file located at ${UNBOUND_CONFIG}"
-          exit
-        fi
-        # Check if output of `unbound-host` run on `UNBOUND_CONFIG` with arguments `-C`, `-v`, and `cloudflare.com` contains "secure"
-        if [[ "$(unbound-host -C ${UNBOUND_CONFIG} -v cloudflare.com)" != *"secure"* ]]; then
-          # If "secure" was not found in output of previous command, print an error message
-          unbound-host -C ${UNBOUND_CONFIG} -v cloudflare.com
-          echo "Error: We found an error on your unbound DNS-SEC config file loacted at ${UNBOUND_CONFIG}"
-          exit
-        fi
-        echo "Your unbound config file located at ${UNBOUND_CONFIG} is valid."
-      fi
-      # Check if the `wg` command is available on the system by checking if it is executable
-      if [ -x "$(command -v wg)" ]; then
-        # Check if the output of `wg` contains "interface" and "public key"
-        if [[ "$(wg show ${WIREGUARD_PUB_NIC})" != *"interface"* ]] || [[ "$(wg show ${WIREGUARD_PUB_NIC})" != *"public key"* ]]; then
-          # If "interface" and "public key" were not found in output of previous command, print an error message
-          echo "Error: We found an error on your WireGuard interface."
-          exit
-        fi
-        echo "Your WireGuard interface is valid."
-      fi
+    16) # Diagnose the setup
+      run-diagnostics
+      exit $?
       ;;
     17) # List peers with their tunnel addresses
       if ! grep --quiet '^# .* start$' "${WIREGUARD_CONFIG}"; then
