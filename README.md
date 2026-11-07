@@ -33,13 +33,20 @@ sudo CONTENT_BLOCKER_URL=https://raw.githubusercontent.com/StevenBlack/hosts/mas
 
 **Networking**
 - IP forwarding is set once in `/etc/sysctl.d/99-wireguard-manager.conf` instead of being turned off host-wide on `wg-quick down`. Uninstall removes that file again (runtime forwarding is left on until the next reboot so Docker or other tunnels aren't cut off).
-- PostUp/PostDown add `FORWARD` accept rules (iptables/ip6tables) so clients work on hosts with a DROP forward policy (Docker, ufw).
+- PostUp/PostDown add `FORWARD` accept rules (iptables/ip6tables) so clients work on hosts with a DROP forward policy (Docker, ufw). They use `-w 5` to wait for the xtables lock, so they don't fail when fail2ban or other scripts edit iptables at the same time during boot.
 - Interface name overridable via `WIREGUARD_PUB_NIC`.
 - Peer changes reload with `wg syncconf` instead of `wg addconf`.
+
+**Server address**
+- Public IP detection checks the server's own interfaces first (Nyr-style). One public address is used directly; several give you a menu; only private/CGNAT addresses mean the server is behind NAT, and then the address found online is offered as an editable default, where a hostname works too. Outside lookups are validated, so an empty or garbage reply is never used.
+- The address you choose is actually used. Upstream ignored the custom/selected IP and always wrote the raw detection result into the endpoint.
+- IPv6 detection skips ULA (`fd..`), temporary privacy and deprecated addresses.
+- DDNS (`--ddns`) leaves hostname endpoints alone and keeps the current IP if it's still on the server.
 
 **DNS**
 - One DNS menu instead of two: public resolvers first (1 Cloudflare, default; 2 AdGuard; 3 NextDNS; 4 OpenDNS; 5 Google; 6 Verisign; 7 Quad9; 8 FDN; 9 Custom), then 10 Unbound on the server (optional content-blocker) and 11 Pi-Hole if installed. Upstream defaulted to Unbound, which takes over the host's `/etc/resolv.conf` and port 53.
 - Headless installs default to Cloudflare. Set `DNS_PROVIDER_SETTINGS=10` for Unbound.
+- Custom DNS (option 9) only accepts valid IPv4/IPv6 addresses, comma or space separated.
 
 **Unbound**
 - Root hints and blocklist download to a temp file with `curl --fail` and only replace the live file on success; a failed blocklist update is rolled back if `unbound-checkconf` fails, and Unbound is only restarted on a valid config.

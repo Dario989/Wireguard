@@ -58,6 +58,26 @@ function validate-peer-name() {
   fi
 }
 
+# Address checks used for public IP detection and DNS validation.
+function is-ipv4() {
+  local octet
+  local -a octets
+  [[ "${1}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
+  IFS=. read -ra octets <<<"${1}"
+  for octet in "${octets[@]}"; do
+    ((10#${octet} <= 255)) || return 1
+  done
+}
+
+function is-ipv6() {
+  [[ "${1}" == *:* && "${1}" =~ ^[0-9A-Fa-f:.]+$ && ${#1} -le 45 ]]
+}
+
+# Private, CGNAT, loopback and link-local IPv4 ranges are not reachable from the internet.
+function is-private-ipv4() {
+  [[ "${1}" =~ ^(10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.) ]]
+}
+
 # Suggest the next free default peer name: peer1, peer2, ...
 function next-peer-name() {
   local n=1
@@ -385,19 +405,49 @@ else
   SYSTEM_CRON_NAME="cron"
 fi
 
-# This is a Bash function named "get-network-information" that retrieves network information.
+# Detect the server's public addresses. The server's own interfaces are checked first; an outside
+# lookup is only used when the server has no public address of its own (i.e. it is behind NAT).
 function get-network-information() {
-  # This variable will store the IPv4 address of the default network interface by querying the "ipengine" API using "curl" command and extracting it using "jq" command.
-  DEFAULT_INTERFACE_IPV4="$(curl --ipv4 --connect-timeout 5 --tlsv1.2 --silent 'https://checkip.amazonaws.com')"
-  # If the IPv4 address is empty, try getting it from another API.
-  if [ -z "${DEFAULT_INTERFACE_IPV4}" ]; then
-    DEFAULT_INTERFACE_IPV4="$(curl --ipv4 --connect-timeout 5 --tlsv1.3 --silent 'https://icanhazip.com')"
+  local addr lookup
+  # IPv4: every global address that isn't private, CGNAT or link-local.
+  LOCAL_PUBLIC_IPV4_LIST=()
+  for addr in $(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut --delimiter="/" --fields=1); do
+    if ! is-private-ipv4 "${addr}"; then
+      LOCAL_PUBLIC_IPV4_LIST+=("${addr}")
+    fi
+  done
+  DEFAULT_INTERFACE_IPV4=""
+  if [ "${#LOCAL_PUBLIC_IPV4_LIST[@]}" -gt 0 ]; then
+    SERVER_BEHIND_NAT=false
+    DEFAULT_INTERFACE_IPV4="${LOCAL_PUBLIC_IPV4_LIST[0]}"
+  else
+    SERVER_BEHIND_NAT=true
+    for lookup in 'https://checkip.amazonaws.com' 'https://icanhazip.com'; do
+      addr=$(curl --ipv4 --connect-timeout 5 --max-time 10 --silent "${lookup}" | tr -d '[:space:]')
+      if is-ipv4 "${addr}"; then
+        DEFAULT_INTERFACE_IPV4="${addr}"
+        break
+      fi
+    done
   fi
-  # This variable will store the IPv6 address of the default network interface by querying the "ipengine" API using "curl" command and extracting it using "jq" command.
-  DEFAULT_INTERFACE_IPV6="$(curl --ipv6 --connect-timeout 5 --tlsv1.3 --silent 'https://ifconfig.co')"
-  # If the IPv6 address is empty, try getting it from another API.
-  if [ -z "${DEFAULT_INTERFACE_IPV6}" ]; then
-    DEFAULT_INTERFACE_IPV6="$(curl --ipv6 --connect-timeout 5 --tlsv1.3 --silent 'https://icanhazip.com')"
+  # IPv6: global addresses, skipping ULA (fc00::/7), temporary privacy and deprecated addresses.
+  LOCAL_PUBLIC_IPV6_LIST=()
+  for addr in $(ip -6 -o addr show scope global 2>/dev/null | grep --invert-match 'temporary\|deprecated' | awk '{print $4}' | cut --delimiter="/" --fields=1); do
+    if [[ ! "${addr}" =~ ^[fF][cCdD] ]]; then
+      LOCAL_PUBLIC_IPV6_LIST+=("${addr}")
+    fi
+  done
+  DEFAULT_INTERFACE_IPV6=""
+  if [ "${#LOCAL_PUBLIC_IPV6_LIST[@]}" -gt 0 ]; then
+    DEFAULT_INTERFACE_IPV6="${LOCAL_PUBLIC_IPV6_LIST[0]}"
+  else
+    for lookup in 'https://ifconfig.co' 'https://icanhazip.com'; do
+      addr=$(curl --ipv6 --connect-timeout 5 --max-time 10 --silent "${lookup}" | tr -d '[:space:]')
+      if is-ipv6 "${addr}"; then
+        DEFAULT_INTERFACE_IPV6="${addr}"
+        break
+      fi
+    done
   fi
 }
 
@@ -600,26 +650,39 @@ if [ ! -f "${WIREGUARD_CONFIG}" ]; then
 
   # Define a function to retrieve the IPv4 address of the WireGuard interface
   function test-connectivity-v4() {
-    # Prompt the user to choose the method for detecting the IPv4 address
-    echo "How would you like to detect IPv4?"
-    echo "  1) Curl (Recommended)"
-    echo "  2) Custom (Advanced)"
-    # Loop until the user provides a valid input
+    local i
+    echo "Which public IPv4 address should clients connect to?"
+    echo "  1) Auto-detect (Recommended)${DEFAULT_INTERFACE_IPV4:+ [${DEFAULT_INTERFACE_IPV4}]}"
+    echo "  2) Custom address or hostname (Advanced)"
     until [[ "${SERVER_HOST_V4_SETTINGS}" =~ ^[1-2]$ ]]; do
       read -rp "IPv4 Choice [1-2]:" -e -i 1 SERVER_HOST_V4_SETTINGS
     done
-    # Choose the method for detecting the IPv4 address based on the user's input
     case ${SERVER_HOST_V4_SETTINGS} in
     1)
-      SERVER_HOST_V4=${DEFAULT_INTERFACE_IPV4} # Use the default IPv4 address
+      if [ "${#LOCAL_PUBLIC_IPV4_LIST[@]}" -gt 1 ] && [ "${HEADLESS_INSTALL}" != true ]; then
+        # Several public addresses on this server: let the user pick one.
+        echo "This server has several public IPv4 addresses:"
+        for i in "${!LOCAL_PUBLIC_IPV4_LIST[@]}"; do
+          echo "  $((i + 1))) ${LOCAL_PUBLIC_IPV4_LIST[i]}"
+        done
+        until [[ "${IPV4_ADDRESS_CHOICE}" =~ ^[0-9]+$ ]] && [ "${IPV4_ADDRESS_CHOICE}" -ge 1 ] && [ "${IPV4_ADDRESS_CHOICE}" -le "${#LOCAL_PUBLIC_IPV4_LIST[@]}" ]; do
+          read -rp "IPv4 address [1-${#LOCAL_PUBLIC_IPV4_LIST[@]}]:" -e -i 1 IPV4_ADDRESS_CHOICE
+        done
+        SERVER_HOST_V4="${LOCAL_PUBLIC_IPV4_LIST[IPV4_ADDRESS_CHOICE - 1]}"
+      elif [ "${SERVER_BEHIND_NAT}" == true ] && [ "${HEADLESS_INSTALL}" != true ]; then
+        # Only private addresses here: confirm the public one found online, or enter a hostname.
+        echo "This server is behind NAT. What is its public IPv4 address or hostname?"
+        until [ -n "${SERVER_HOST_V4}" ]; do
+          read -rp "Public IPv4 address / hostname:" -e -i "${DEFAULT_INTERFACE_IPV4}" SERVER_HOST_V4
+        done
+      else
+        SERVER_HOST_V4="${DEFAULT_INTERFACE_IPV4}"
+      fi
       ;;
     2)
-      # Prompt the user to enter a custom IPv4 address
-      read -rp "Custom IPv4:" SERVER_HOST_V4
-      # If the user doesn't provide an input, use the default IPv4 address
-      if [ -z "${SERVER_HOST_V4}" ]; then
-        SERVER_HOST_V4=${DEFAULT_INTERFACE_IPV4}
-      fi
+      until [ -n "${SERVER_HOST_V4}" ]; do
+        read -rp "Custom IPv4 address / hostname:" -e -i "${DEFAULT_INTERFACE_IPV4}" SERVER_HOST_V4
+      done
       ;;
     esac
   }
@@ -630,26 +693,32 @@ if [ ! -f "${WIREGUARD_CONFIG}" ]; then
 
   # Define a function to retrieve the IPv6 address of the WireGuard interface
   function test-connectivity-v6() {
-    # Prompt the user to choose the method for detecting the IPv6 address
-    echo "How would you like to detect IPv6?"
-    echo "  1) Curl (Recommended)"
-    echo "  2) Custom (Advanced)"
-    # Loop until the user provides a valid input
+    local i
+    echo "Which public IPv6 address should clients connect to?"
+    echo "  1) Auto-detect (Recommended)${DEFAULT_INTERFACE_IPV6:+ [${DEFAULT_INTERFACE_IPV6}]}"
+    echo "  2) Custom address or hostname (Advanced)"
     until [[ "${SERVER_HOST_V6_SETTINGS}" =~ ^[1-2]$ ]]; do
       read -rp "IPv6 Choice [1-2]:" -e -i 1 SERVER_HOST_V6_SETTINGS
     done
-    # Choose the method for detecting the IPv6 address based on the user's input
     case ${SERVER_HOST_V6_SETTINGS} in
     1)
-      SERVER_HOST_V6=${DEFAULT_INTERFACE_IPV6} # Use the default IPv6 address
+      if [ "${#LOCAL_PUBLIC_IPV6_LIST[@]}" -gt 1 ] && [ "${HEADLESS_INSTALL}" != true ]; then
+        echo "This server has several public IPv6 addresses:"
+        for i in "${!LOCAL_PUBLIC_IPV6_LIST[@]}"; do
+          echo "  $((i + 1))) ${LOCAL_PUBLIC_IPV6_LIST[i]}"
+        done
+        until [[ "${IPV6_ADDRESS_CHOICE}" =~ ^[0-9]+$ ]] && [ "${IPV6_ADDRESS_CHOICE}" -ge 1 ] && [ "${IPV6_ADDRESS_CHOICE}" -le "${#LOCAL_PUBLIC_IPV6_LIST[@]}" ]; do
+          read -rp "IPv6 address [1-${#LOCAL_PUBLIC_IPV6_LIST[@]}]:" -e -i 1 IPV6_ADDRESS_CHOICE
+        done
+        SERVER_HOST_V6="${LOCAL_PUBLIC_IPV6_LIST[IPV6_ADDRESS_CHOICE - 1]}"
+      else
+        SERVER_HOST_V6="${DEFAULT_INTERFACE_IPV6}"
+      fi
       ;;
     2)
-      # Prompt the user to enter a custom IPv6 address
-      read -rp "Custom IPv6:" SERVER_HOST_V6
-      # If the user doesn't provide an input, use the default IPv6 address
-      if [ -z "${SERVER_HOST_V6}" ]; then
-        SERVER_HOST_V6=${DEFAULT_INTERFACE_IPV6}
-      fi
+      until [ -n "${SERVER_HOST_V6}" ]; do
+        read -rp "Custom IPv6 address / hostname:" -e -i "${DEFAULT_INTERFACE_IPV6}" SERVER_HOST_V6
+      done
       ;;
     esac
   }
@@ -825,24 +894,28 @@ if [ ! -f "${WIREGUARD_CONFIG}" ]; then
     # Set the SERVER_HOST variable based on the user's choice.
     case ${SERVER_HOST_SETTINGS} in
     1)
-      # If the user chose IPv4 and a default IPv4 interface is available, use it.
-      if [ -n "${DEFAULT_INTERFACE_IPV4}" ]; then
-        SERVER_HOST="${DEFAULT_INTERFACE_IPV4}"
+      if [ -n "${SERVER_HOST_V4}" ]; then
+        SERVER_HOST="${SERVER_HOST_V4}"
       else
-        # If no default IPv4 interface is available, use the default IPv6 interface.
-        SERVER_HOST="[${DEFAULT_INTERFACE_IPV6}]"
+        SERVER_HOST="${SERVER_HOST_V6}"
       fi
       ;;
     2)
-      # If the user chose IPv6 and a default IPv6 interface is available, use it.
-      if [ -n "${DEFAULT_INTERFACE_IPV6}" ]; then
-        SERVER_HOST="[${DEFAULT_INTERFACE_IPV6}]"
+      if [ -n "${SERVER_HOST_V6}" ]; then
+        SERVER_HOST="${SERVER_HOST_V6}"
       else
-        # If no default IPv6 interface is available, use the default IPv4 interface.
-        SERVER_HOST="${DEFAULT_INTERFACE_IPV4}"
+        SERVER_HOST="${SERVER_HOST_V4}"
       fi
       ;;
     esac
+    if [ -z "${SERVER_HOST}" ]; then
+      echo "Error: Could not determine a public address for this server. Choose the custom option and enter it manually."
+      exit 1
+    fi
+    # A literal IPv6 address needs brackets in an endpoint; hostnames and IPv4 don't.
+    if is-ipv6 "${SERVER_HOST}"; then
+      SERVER_HOST="[${SERVER_HOST}]"
+    fi
   }
 
   # Invoke the ipvx-select function to select the IP version for the WireGuard server.
@@ -1012,11 +1085,26 @@ if [ ! -f "${WIREGUARD_CONFIG}" ]; then
       CLIENT_DNS="80.67.169.40,80.67.169.12,2001:910:800::40,2001:910:800::12"
       ;;
     9)
-      read -rp "Custom DNS (comma separated):" CLIENT_DNS
-      # If the user doesn't provide a custom DNS, default to Cloudflare.
-      if [ -z "${CLIENT_DNS}" ]; then
-        CLIENT_DNS="1.1.1.1,1.0.0.1,2606:4700:4700::1111,2606:4700:4700::1001"
-      fi
+      # Accept only real IPv4/IPv6 addresses; empty input falls back to Cloudflare.
+      until [ -n "${CLIENT_DNS}" ]; do
+        read -rp "Custom DNS servers (IPv4/IPv6, comma or space separated):" CUSTOM_DNS_INPUT
+        if [ -z "${CUSTOM_DNS_INPUT}" ]; then
+          CLIENT_DNS="1.1.1.1,1.0.0.1,2606:4700:4700::1111,2606:4700:4700::1001"
+          break
+        fi
+        CUSTOM_DNS_VALID=true
+        for CUSTOM_DNS_IP in ${CUSTOM_DNS_INPUT//,/ }; do
+          if is-ipv4 "${CUSTOM_DNS_IP}" || is-ipv6 "${CUSTOM_DNS_IP}"; then
+            CLIENT_DNS="${CLIENT_DNS:+${CLIENT_DNS},}${CUSTOM_DNS_IP}"
+          else
+            echo "Invalid DNS server address: ${CUSTOM_DNS_IP}"
+            CUSTOM_DNS_VALID=false
+          fi
+        done
+        if [ "${CUSTOM_DNS_VALID}" != true ]; then
+          CLIENT_DNS=""
+        fi
+      done
       ;;
     10)
       # Unbound sets CLIENT_DNS to the tunnel gateway itself during install-unbound.
@@ -1381,12 +1469,12 @@ if [ ! -f "${WIREGUARD_CONFIG}" ]; then
     fi
     # If iptables is present, let wg traffic through a FORWARD policy of DROP (Docker, ufw).
     if [ -x "$(command -v iptables)" ]; then
-      NFTABLES_POSTUP="${NFTABLES_POSTUP}; iptables -I FORWARD -i ${WIREGUARD_PUB_NIC} -j ACCEPT; iptables -I FORWARD -o ${WIREGUARD_PUB_NIC} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT"
-      NFTABLES_POSTDOWN="${NFTABLES_POSTDOWN}; iptables -D FORWARD -i ${WIREGUARD_PUB_NIC} -j ACCEPT; iptables -D FORWARD -o ${WIREGUARD_PUB_NIC} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT"
+      NFTABLES_POSTUP="${NFTABLES_POSTUP}; iptables -w 5 -I FORWARD -i ${WIREGUARD_PUB_NIC} -j ACCEPT; iptables -w 5 -I FORWARD -o ${WIREGUARD_PUB_NIC} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT"
+      NFTABLES_POSTDOWN="${NFTABLES_POSTDOWN}; iptables -w 5 -D FORWARD -i ${WIREGUARD_PUB_NIC} -j ACCEPT; iptables -w 5 -D FORWARD -o ${WIREGUARD_PUB_NIC} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT"
     fi
     if [ -x "$(command -v ip6tables)" ]; then
-      NFTABLES_POSTUP="${NFTABLES_POSTUP}; ip6tables -I FORWARD -i ${WIREGUARD_PUB_NIC} -j ACCEPT; ip6tables -I FORWARD -o ${WIREGUARD_PUB_NIC} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT"
-      NFTABLES_POSTDOWN="${NFTABLES_POSTDOWN}; ip6tables -D FORWARD -i ${WIREGUARD_PUB_NIC} -j ACCEPT; ip6tables -D FORWARD -o ${WIREGUARD_PUB_NIC} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT"
+      NFTABLES_POSTUP="${NFTABLES_POSTUP}; ip6tables -w 5 -I FORWARD -i ${WIREGUARD_PUB_NIC} -j ACCEPT; ip6tables -w 5 -I FORWARD -o ${WIREGUARD_PUB_NIC} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT"
+      NFTABLES_POSTDOWN="${NFTABLES_POSTDOWN}; ip6tables -w 5 -D FORWARD -i ${WIREGUARD_PUB_NIC} -j ACCEPT; ip6tables -w 5 -D FORWARD -o ${WIREGUARD_PUB_NIC} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT"
     fi
     # Enable forwarding persistently instead of toggling it host-wide on every up/down.
     printf 'net.ipv4.ip_forward = 1\nnet.ipv6.conf.all.forwarding = 1\n' >"${WIREGUARD_SYSCTL_CONFIG}"
@@ -1972,6 +2060,17 @@ PublicKey = ${SERVER_PUBKEY}" >>${WIREGUARD_CLIENT_PATH}/"${NEW_CLIENT_NAME}".co
         OLD_SERVER_HOST=$(head --lines=1 ${WIREGUARD_CONFIG} | cut --delimiter=" " --fields=4 | cut --delimiter="[" --fields=2 | cut --delimiter="]" --fields=1)
         NEW_SERVER_HOST=${DEFAULT_INTERFACE_IPV6}
       fi
+      # A hostname endpoint follows the server by itself; there is nothing to rewrite.
+      if ! is-ipv4 "${OLD_SERVER_HOST}" && ! is-ipv6 "${OLD_SERVER_HOST}"; then
+        echo "The endpoint is a hostname (${OLD_SERVER_HOST}), nothing to update."
+        exit 0
+      fi
+      # If the current address is still assigned to this server, keep it (servers with several IPs).
+      for LOCAL_PUBLIC_ADDRESS in "${LOCAL_PUBLIC_IPV4_LIST[@]}" "${LOCAL_PUBLIC_IPV6_LIST[@]}"; do
+        if [ "${LOCAL_PUBLIC_ADDRESS}" == "${OLD_SERVER_HOST}" ]; then
+          NEW_SERVER_HOST="${OLD_SERVER_HOST}"
+        fi
+      done
       if [ -z "${NEW_SERVER_HOST}" ]; then
         echo "Error: Could not detect the public IP address, leaving configuration unchanged."
         exit 1
