@@ -58,18 +58,85 @@ function validate-peer-name() {
   fi
 }
 
-# Download to a temp file and only replace the target if curl succeeded and the content is non-empty.
-function safe-download() {
-  local url="${1}" target="${2}" tmp
-  tmp=$(mktemp)
-  if curl --fail --silent --show-error --location --retry 3 "${url}" -o "${tmp}" && [ -s "${tmp}" ]; then
-    mkdir --parents "$(dirname "${target}")"
-    mv "${tmp}" "${target}"
-    return 0
-  fi
-  rm --force "${tmp}"
-  echo "Warning: Download of ${url} failed, keeping existing ${target}."
+# Try each URL in order and print the first non-empty response to stdout.
+function fetch-first() {
+  local url body
+  for url in "$@"; do
+    if body=$(curl --fail --silent --location --retry 2 --connect-timeout 10 --max-time 120 "${url}") && [ -n "${body}" ]; then
+      printf '%s\n' "${body}"
+      return 0
+    fi
+    echo "Warning: ${url} failed, trying next source." >&2
+  done
   return 1
+}
+
+# Refresh the Unbound root hints. Prefers the distro copy (Debian/Ubuntu dns-root-data), then downloads.
+# Only accepts a file that actually lists the root servers. Returns 0 if the file changed.
+function update-root-hints() {
+  local tmp
+  tmp=$(mktemp)
+  if [ -s "${UNBOUND_LOCAL_ROOT_HINTS}" ]; then
+    cp "${UNBOUND_LOCAL_ROOT_HINTS}" "${tmp}"
+  elif ! fetch-first "${UNBOUND_ROOT_HINTS_URLS[@]}" >"${tmp}"; then
+    rm --force "${tmp}"
+    echo "Warning: Could not download root hints, keeping the existing file."
+    return 1
+  fi
+  if ! grep --quiet --ignore-case "A.ROOT-SERVERS.NET" "${tmp}"; then
+    rm --force "${tmp}"
+    echo "Warning: Downloaded root hints look invalid, keeping the existing file."
+    return 1
+  fi
+  if cmp --silent "${tmp}" "${UNBOUND_ROOT_HINTS}"; then
+    rm --force "${tmp}"
+    return 1
+  fi
+  mkdir --parents "$(dirname "${UNBOUND_ROOT_HINTS}")"
+  chmod 644 "${tmp}"
+  mv "${tmp}" "${UNBOUND_ROOT_HINTS}"
+  return 0
+}
+
+# Refresh the content-blocker zone file. Accepts plain domain lists and hosts-format lists
+# (0.0.0.0 example.com). Rolls back if Unbound rejects the result. Returns 0 if the file changed.
+function update-content-blocker() {
+  local raw tmp
+  raw=$(mktemp)
+  tmp=$(mktemp)
+  if ! fetch-first "${UNBOUND_CONFIG_HOST_URLS[@]}" >"${raw}"; then
+    rm --force "${raw}" "${tmp}"
+    echo "Warning: Could not download the content-blocker list, keeping the existing one."
+    return 1
+  fi
+  awk '{ d = $1 } ($1 == "0.0.0.0" || $1 == "127.0.0.1" || $1 == "::" || $1 == "::1") { d = $2 } d ~ /^[A-Za-z0-9._-]+$/ && d !~ /^#/ && d != "localhost" && !seen[d]++ { print "local-zone: \"" d "\" always_refuse" }' <"${raw}" >"${tmp}"
+  rm --force "${raw}"
+  if [ ! -s "${tmp}" ]; then
+    rm --force "${tmp}"
+    echo "Warning: Content-blocker list was empty or unreadable, keeping the existing one."
+    return 1
+  fi
+  if cmp --silent "${tmp}" "${UNBOUND_CONFIG_HOST}"; then
+    rm --force "${tmp}"
+    return 1
+  fi
+  mkdir --parents "$(dirname "${UNBOUND_CONFIG_HOST}")"
+  chmod 644 "${tmp}"
+  if [ -f "${UNBOUND_CONFIG_HOST}" ]; then
+    cp --preserve=all "${UNBOUND_CONFIG_HOST}" "${UNBOUND_CONFIG_HOST}.bak"
+  fi
+  mv "${tmp}" "${UNBOUND_CONFIG_HOST}"
+  if [ -f "${UNBOUND_CONFIG}" ] && ! unbound-checkconf "${UNBOUND_CONFIG}" >/dev/null 2>&1; then
+    if [ -f "${UNBOUND_CONFIG_HOST}.bak" ]; then
+      mv "${UNBOUND_CONFIG_HOST}.bak" "${UNBOUND_CONFIG_HOST}"
+    else
+      : >"${UNBOUND_CONFIG_HOST}"
+    fi
+    echo "Warning: New content-blocker list broke the Unbound config, rolled back."
+    return 1
+  fi
+  rm --force "${UNBOUND_CONFIG_HOST}.bak"
+  return 0
 }
 
 # Function to gather current system details
@@ -271,40 +338,21 @@ fi
 UNBOUND_CONFIG_DIRECTORY="${UNBOUND_ROOT}/unbound.conf.d"
 # Assigns a path for the Unbound hosts configuration file
 UNBOUND_CONFIG_HOST="${UNBOUND_CONFIG_DIRECTORY}/hosts.conf"
-case $(shuf --input-range=1-5 --head-count=1) in
-1)
-  UNBOUND_ROOT_SERVER_CONFIG_URL="https://raw.githubusercontent.com/complexorganizations/wireguard-manager/main/assets/named.cache"
-  ;;
-2)
-  UNBOUND_ROOT_SERVER_CONFIG_URL="https://cdn.statically.io/gh/complexorganizations/wireguard-manager/main/assets/named.cache"
-  ;;
-3)
-  UNBOUND_ROOT_SERVER_CONFIG_URL="https://cdn.jsdelivr.net/gh/complexorganizations/wireguard-manager/assets/named.cache"
-  ;;
-4)
-  UNBOUND_ROOT_SERVER_CONFIG_URL="https://www.internic.net/domain/named.cache"
-  ;;
-5)
-  UNBOUND_ROOT_SERVER_CONFIG_URL="https://gitlab.com/complex-organizations/wireguard-manager/-/raw/main/assets/named.cache"
-  ;;
-esac
-case $(shuf --input-range=1-5 --head-count=1) in
-1)
-  UNBOUND_CONFIG_HOST_URL="https://raw.githubusercontent.com/complexorganizations/content-blocker/main/assets/hosts"
-  ;;
-2)
-  UNBOUND_CONFIG_HOST_URL="https://cdn.statically.io/gh/complexorganizations/content-blocker/main/assets/hosts"
-  ;;
-3)
-  UNBOUND_CONFIG_HOST_URL="https://cdn.jsdelivr.net/gh/complexorganizations/content-blocker/assets/hosts"
-  ;;
-4)
-  UNBOUND_CONFIG_HOST_URL="https://combinatronics.io/complexorganizations/content-blocker/main/assets/hosts"
-  ;;
-5)
-  UNBOUND_CONFIG_HOST_URL="https://gitlab.com/complex-organizations/wireguard-manager/-/raw/main/assets/hosts"
-  ;;
-esac
+# Root hints sources, tried in order. The distro copy (dns-root-data) is used first if present.
+UNBOUND_LOCAL_ROOT_HINTS="/usr/share/dns/root.hints"
+UNBOUND_ROOT_HINTS_URLS=(
+  "https://www.internic.net/domain/named.cache"
+  "https://raw.githubusercontent.com/complexorganizations/wireguard-manager/main/assets/named.cache"
+)
+# Content-blocker sources, tried in order. Set CONTENT_BLOCKER_URL to use your own list first
+# (plain domains or hosts format, e.g. https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts).
+UNBOUND_CONFIG_HOST_URLS=(
+  "https://raw.githubusercontent.com/complexorganizations/content-blocker/main/assets/hosts"
+  "https://cdn.jsdelivr.net/gh/complexorganizations/content-blocker/assets/hosts"
+)
+if [ -n "${CONTENT_BLOCKER_URL}" ]; then
+  UNBOUND_CONFIG_HOST_URLS=("${CONTENT_BLOCKER_URL}" "${UNBOUND_CONFIG_HOST_URLS[@]}")
+fi
 WIREGUARD_MANAGER_UPDATE="https://raw.githubusercontent.com/Dario989/Wireguard/main/wireguard-manager.sh"
 # Check if the CURRENT_DISTRO variable matches any of the following distros:
 # fedora, centos, rhel, almalinux, or rocky
@@ -1246,8 +1294,8 @@ if [ ! -f "${WIREGUARD_CONFIG}" ]; then
       fi
       # Configure Unbound using anchor and root hints.
       unbound-anchor -a ${UNBOUND_ANCHOR}
-      # Download root hints.
-      safe-download "${UNBOUND_ROOT_SERVER_CONFIG_URL}" "${UNBOUND_ROOT_HINTS}"
+      # Fetch root hints (distro copy first, then download).
+      update-root-hints
       # Configure Unbound settings.
       # The settings are stored in a temporary variable and then written to the Unbound configuration file.
       # If INSTALL_BLOCK_LIST is true, include a block list in the Unbound configuration.
@@ -1294,19 +1342,20 @@ if [ ! -f "${WIREGUARD_CONFIG}" ]; then
 \tqname-minimisation: yes
 \tprefetch-key: yes"
       echo -e "${UNBOUND_TEMP_INTERFACE_INFO}" | awk '!seen[$0]++' >${UNBOUND_CONFIG}
+      # Without a root hints file Unbound refuses to start; let it use its built-in hints instead.
+      if [ ! -s "${UNBOUND_ROOT_HINTS}" ]; then
+        sed --in-place '/^[[:space:]]*root-hints:/d' "${UNBOUND_CONFIG}"
+      fi
       # Configure block list if INSTALL_BLOCK_LIST is true.
       if [ "${INSTALL_BLOCK_LIST}" == true ]; then
         echo -e "\tinclude: ${UNBOUND_CONFIG_HOST}" >>${UNBOUND_CONFIG}
         if [ ! -d "${UNBOUND_CONFIG_DIRECTORY}" ]; then
           mkdir --parents "${UNBOUND_CONFIG_DIRECTORY}"
         fi
-        UNBOUND_HOSTS_TMP=$(mktemp)
-        if curl --fail --silent --show-error --location --retry 3 "${UNBOUND_CONFIG_HOST_URL}" | awk 'NF && $1 !~ /^#/ {print "local-zone: \""$1"\" always_refuse"}' >"${UNBOUND_HOSTS_TMP}" && [ -s "${UNBOUND_HOSTS_TMP}" ]; then
-          mv "${UNBOUND_HOSTS_TMP}" "${UNBOUND_CONFIG_HOST}"
-        else
-          rm --force "${UNBOUND_HOSTS_TMP}"
+        update-content-blocker
+        # The include must point at an existing file, even if the download failed.
+        if [ ! -f "${UNBOUND_CONFIG_HOST}" ]; then
           : >"${UNBOUND_CONFIG_HOST}"
-          echo "Warning: Could not download the content-blocker list, continuing without it."
         fi
       fi
       # Update ownership of Unbound's root directory.
@@ -1856,33 +1905,12 @@ PublicKey = ${SERVER_PUBKEY}" >>${WIREGUARD_CLIENT_PATH}/"${NEW_CLIENT_NAME}"-${
       # Update the unbound configs if the unbound command is available on the system
       if [ -x "$(command -v unbound)" ]; then
         # Update the unbound root hints file if it exists
-        if [ -f "${UNBOUND_ROOT_HINTS}" ]; then
-          CURRENT_ROOT_HINTS_HASH=$(openssl dgst -sha3-512 "${UNBOUND_ROOT_HINTS}" | cut --delimiter=" " --fields=2)
-          NEW_ROOT_HINTS_HASH=$(curl --silent "${UNBOUND_ROOT_SERVER_CONFIG_URL}" | openssl dgst -sha3-512 | cut --delimiter=" " --fields=2)
-          if [ "${CURRENT_ROOT_HINTS_HASH}" != "${NEW_ROOT_HINTS_HASH}" ]; then
-            safe-download "${UNBOUND_ROOT_SERVER_CONFIG_URL}" "${UNBOUND_ROOT_HINTS}" && echo "Updating root hints file..."
-          fi
+        if [ -f "${UNBOUND_ROOT_HINTS}" ] && update-root-hints; then
+          echo "Updating root hints file..."
         fi
-        # Update the unbound config host file if it exists
-        if [ -f "${UNBOUND_CONFIG_HOST}" ]; then
-          CURRENT_UNBOUND_HOSTS_HASH=$(openssl dgst -sha3-512 "${UNBOUND_CONFIG_HOST}" | cut --delimiter=" " --fields=2)
-          NEW_UNBOUND_HOSTS_HASH=$(curl --silent "${UNBOUND_CONFIG_HOST_URL}" | awk 'NF && $1 !~ /^#/ {print "local-zone: \""$1"\" always_refuse"}' | openssl dgst -sha3-512 | cut --delimiter=" " --fields=2)
-          if [ "${CURRENT_UNBOUND_HOSTS_HASH}" != "${NEW_UNBOUND_HOSTS_HASH}" ]; then
-            UNBOUND_HOSTS_TMP=$(mktemp)
-            if curl --fail --silent --show-error --location "${UNBOUND_CONFIG_HOST_URL}" | awk 'NF && $1 !~ /^#/ {print "local-zone: \""$1"\" always_refuse"}' >"${UNBOUND_HOSTS_TMP}" && [ -s "${UNBOUND_HOSTS_TMP}" ]; then
-              cp --preserve=all "${UNBOUND_CONFIG_HOST}" "${UNBOUND_CONFIG_HOST}.bak"
-              mv "${UNBOUND_HOSTS_TMP}" "${UNBOUND_CONFIG_HOST}"
-              if ! unbound-checkconf "${UNBOUND_CONFIG}" >/dev/null 2>&1; then
-                mv "${UNBOUND_CONFIG_HOST}.bak" "${UNBOUND_CONFIG_HOST}"
-                echo "Warning: New content-blocker list broke the Unbound config, rolled back."
-              else
-                rm --force "${UNBOUND_CONFIG_HOST}.bak"
-                echo "Updating unbound config host file..."
-              fi
-            else
-              rm --force "${UNBOUND_HOSTS_TMP}"
-            fi
-          fi
+        # Update the unbound content-blocker file if it exists
+        if [ -f "${UNBOUND_CONFIG_HOST}" ] && update-content-blocker; then
+          echo "Updating unbound config host file..."
         fi
         # Once everything is completed, restart the unbound service (only if the config is valid)
         if ! unbound-checkconf "${UNBOUND_CONFIG}" >/dev/null 2>&1; then

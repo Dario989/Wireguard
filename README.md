@@ -16,6 +16,12 @@ Use a different interface name if `wg0` is already taken:
 sudo WIREGUARD_PUB_NIC=wg1 bash /usr/local/bin/wireguard-manager.sh
 ```
 
+Use your own blocklist (plain domains or hosts format):
+
+```bash
+sudo CONTENT_BLOCKER_URL=https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts bash /usr/local/bin/wireguard-manager.sh
+```
+
 ## Changes from upstream
 
 **Safety**
@@ -33,6 +39,8 @@ sudo WIREGUARD_PUB_NIC=wg1 bash /usr/local/bin/wireguard-manager.sh
 
 **Unbound**
 - Root hints and blocklist download to a temp file with `curl --fail` and only replace the live file on success; a failed blocklist update is rolled back if `unbound-checkconf` fails, and Unbound is only restarted on a valid config.
+- Root hints and blocklist no longer come from a random mirror (5 picks per run, including third-party CDNs like statically.io and combinatronics.io). Sources are tried in a fixed order with fallback: root hints use the distro copy (`/usr/share/dns/root.hints`, Debian/Ubuntu `dns-root-data`) first, then IANA's `internic.net`, then GitHub; the blocklist uses GitHub raw, then jsDelivr. Root hints must list the root servers to be accepted, and each file is downloaded once per update instead of twice.
+- Own blocklist: set `CONTENT_BLOCKER_URL` (plain domain list or hosts format such as StevenBlack) and it's tried first. Entries are validated and de-duplicated.
 - `cache-min-ttl` 86400 → 0 (records were cached for at least a day).
 - `access-control: ::0` → `::/0`.
 
