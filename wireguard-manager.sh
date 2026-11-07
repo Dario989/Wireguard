@@ -583,7 +583,7 @@ if [ ! -f "${WIREGUARD_CONFIG}" ]; then
   function set-ipv4-subnet() {
     # Prompt the user for the desired IPv4 subnet
     echo "Please specify the IPv4 subnet you want to use for the WireGuard interface. This should be a private subnet that is not in use elsewhere on your network. For example, you might choose '10.0.0.0/24' if it's not already in use."
-    echo "  1) 10.0.0.0/8 (Recommended)"
+    echo "  1) 10.66.66.0/24 (Recommended)"
     echo "  2) Custom (Advanced)"
     # Keep prompting the user until they enter a valid subnet choice
     until [[ "${PRIVATE_SUBNET_V4_SETTINGS}" =~ ^[1-2]$ ]]; do
@@ -592,12 +592,12 @@ if [ ! -f "${WIREGUARD_CONFIG}" ]; then
     # Based on the user's choice, set the private IPv4 subnet
     case ${PRIVATE_SUBNET_V4_SETTINGS} in
     1)
-      PRIVATE_SUBNET_V4="10.0.0.0/8" # Set a default IPv4 subnet
+      PRIVATE_SUBNET_V4="10.66.66.0/24" # Set a default IPv4 subnet
       ;;
     2)
       read -rp "Custom IPv4 Subnet:" PRIVATE_SUBNET_V4 # Prompt user for custom subnet
       if [ -z "${PRIVATE_SUBNET_V4}" ]; then           # If the user did not enter a subnet, set default
-        PRIVATE_SUBNET_V4="10.0.0.0/8"
+        PRIVATE_SUBNET_V4="10.66.66.0/24"
       fi
       ;;
     esac
@@ -609,8 +609,8 @@ if [ ! -f "${WIREGUARD_CONFIG}" ]; then
   # Define a function to set a custom IPv6 subnet
   function set-ipv6-subnet() {
     # Ask the user which IPv6 subnet they want to use
-    echo "Please specify the IPv6 subnet you want to use for the WireGuard interface. This should be a private subnet that is not in use elsewhere on your network. For example, you might choose 'fd00::/64' if it's not already in use."
-    echo "  1) fd00:00:00::0/8 (Recommended)"
+    echo "Please specify the IPv6 subnet you want to use for the WireGuard interface. This should be a private subnet that is not in use elsewhere on your network. For example, you might choose 'fd42:42:42::0/64' if it's not already in use."
+    echo "  1) fd42:42:42::0/64 (Recommended)"
     echo "  2) Custom (Advanced)"
     # Use a loop to ensure the user inputs a valid option
     until [[ "${PRIVATE_SUBNET_V6_SETTINGS}" =~ ^[1-2]$ ]]; do
@@ -620,14 +620,14 @@ if [ ! -f "${WIREGUARD_CONFIG}" ]; then
     case ${PRIVATE_SUBNET_V6_SETTINGS} in
     1)
       # Use the recommended IPv6 subnet if the user chooses option 1
-      PRIVATE_SUBNET_V6="fd00:00:00::0/8"
+      PRIVATE_SUBNET_V6="fd42:42:42::0/64"
       ;;
     2)
       # Ask the user for a custom IPv6 subnet if they choose option 2
       read -rp "Please enter a custom IPv6 subnet for your WireGuard interface: " PRIVATE_SUBNET_V6
       # If the user does not input a subnet, use the recommended one
       if [ -z "${PRIVATE_SUBNET_V6}" ]; then
-        PRIVATE_SUBNET_V6="fd00:00:00::0/8"
+        PRIVATE_SUBNET_V6="fd42:42:42::0/64"
       fi
       ;;
     esac
@@ -842,7 +842,7 @@ if [ ! -f "${WIREGUARD_CONFIG}" ]; then
     # Ask the user to specify the MTU settings.
     echo "What MTU do you want to use?"
     # Provide the user with options for setting the MTU.
-    echo "  1) 1420 for Interface, 1280 for Peer (Recommended)"
+    echo "  1) 1420 for Interface, automatic for Peers (Recommended)"
     echo "  2) Custom (Advanced)"
     # Continue prompting the user until a valid option (1 or 2) is selected.
     until [[ "${MTU_CHOICE_SETTINGS}" =~ ^[1-2]$ ]]; do
@@ -854,7 +854,8 @@ if [ ! -f "${WIREGUARD_CONFIG}" ]; then
     1)
       # If the user chose the default option, set the Interface MTU to 1420 and Peer MTU to 1280.
       INTERFACE_MTU_CHOICE="1420"
-      PEER_MTU_CHOICE="1280"
+      # "auto" leaves MTU out of client configs so each device uses WireGuard's default.
+      PEER_MTU_CHOICE="auto"
       ;;
     2)
       # If the user chose the custom option, prompt them to enter a custom MTU for Interface and Peer.
@@ -1450,9 +1451,8 @@ if [ ! -f "${WIREGUARD_CONFIG}" ]; then
     # Assign client IPv4 and IPv6 addresses
     CLIENT_ADDRESS_V4=$(echo "${PRIVATE_SUBNET_V4}" | cut --delimiter="." --fields=1-3).2
     CLIENT_ADDRESS_V6=$(echo "${PRIVATE_SUBNET_V6}" | cut --delimiter=":" --fields=1-4):2
-    # Generate pre-shared key and random port for the client
+    # Generate a pre-shared key for the client
     PRESHARED_KEY=$(wg genpsk)
-    PEER_PORT=$(shuf --input-range=1024-65535 --head-count=1)
     # Create the wireguard directory
     mkdir --parents ${WIREGUARD_PATH}
     # Create the client configuration directory
@@ -1469,12 +1469,12 @@ if [ ! -f "${WIREGUARD_CONFIG}" ]; then
     fi
     # If iptables is present, let wg traffic through a FORWARD policy of DROP (Docker, ufw).
     if [ -x "$(command -v iptables)" ]; then
-      NFTABLES_POSTUP="${NFTABLES_POSTUP}; iptables -w 5 -I FORWARD -i ${WIREGUARD_PUB_NIC} -j ACCEPT; iptables -w 5 -I FORWARD -o ${WIREGUARD_PUB_NIC} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT"
-      NFTABLES_POSTDOWN="${NFTABLES_POSTDOWN}; iptables -w 5 -D FORWARD -i ${WIREGUARD_PUB_NIC} -j ACCEPT; iptables -w 5 -D FORWARD -o ${WIREGUARD_PUB_NIC} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT"
+      NFTABLES_POSTUP="${NFTABLES_POSTUP}; iptables -w 5 -I INPUT -p udp --dport ${SERVER_PORT} -j ACCEPT; iptables -w 5 -I FORWARD -i ${WIREGUARD_PUB_NIC} -j ACCEPT; iptables -w 5 -I FORWARD -o ${WIREGUARD_PUB_NIC} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT"
+      NFTABLES_POSTDOWN="${NFTABLES_POSTDOWN}; iptables -w 5 -D INPUT -p udp --dport ${SERVER_PORT} -j ACCEPT; iptables -w 5 -D FORWARD -i ${WIREGUARD_PUB_NIC} -j ACCEPT; iptables -w 5 -D FORWARD -o ${WIREGUARD_PUB_NIC} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT"
     fi
     if [ -x "$(command -v ip6tables)" ]; then
-      NFTABLES_POSTUP="${NFTABLES_POSTUP}; ip6tables -w 5 -I FORWARD -i ${WIREGUARD_PUB_NIC} -j ACCEPT; ip6tables -w 5 -I FORWARD -o ${WIREGUARD_PUB_NIC} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT"
-      NFTABLES_POSTDOWN="${NFTABLES_POSTDOWN}; ip6tables -w 5 -D FORWARD -i ${WIREGUARD_PUB_NIC} -j ACCEPT; ip6tables -w 5 -D FORWARD -o ${WIREGUARD_PUB_NIC} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT"
+      NFTABLES_POSTUP="${NFTABLES_POSTUP}; ip6tables -w 5 -I INPUT -p udp --dport ${SERVER_PORT} -j ACCEPT; ip6tables -w 5 -I FORWARD -i ${WIREGUARD_PUB_NIC} -j ACCEPT; ip6tables -w 5 -I FORWARD -o ${WIREGUARD_PUB_NIC} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT"
+      NFTABLES_POSTDOWN="${NFTABLES_POSTDOWN}; ip6tables -w 5 -D INPUT -p udp --dport ${SERVER_PORT} -j ACCEPT; ip6tables -w 5 -D FORWARD -i ${WIREGUARD_PUB_NIC} -j ACCEPT; ip6tables -w 5 -D FORWARD -o ${WIREGUARD_PUB_NIC} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT"
     fi
     # Enable forwarding persistently instead of toggling it host-wide on every up/down.
     printf 'net.ipv4.ip_forward = 1\nnet.ipv6.conf.all.forwarding = 1\n' >"${WIREGUARD_SYSCTL_CONFIG}"
@@ -1496,13 +1496,18 @@ PresharedKey = ${PRESHARED_KEY}
 AllowedIPs = ${CLIENT_ADDRESS_V4}/32,${CLIENT_ADDRESS_V6}/128
 # ${CLIENT_NAME} end" >>${WIREGUARD_CONFIG}
 
+    # Client MTU: only set when a custom value was chosen.
+    if [ "${PEER_MTU_CHOICE}" == "auto" ]; then
+      CLIENT_MTU_LINE="# MTU = 1420 (uncomment and lower, e.g. to 1280, only if large transfers stall)"
+    else
+      CLIENT_MTU_LINE="MTU = ${PEER_MTU_CHOICE}"
+    fi
     # Generate client-specific WireGuard configuration file
     echo "# ${WIREGUARD_WEBSITE_URL}
 [Interface]
-Address = ${CLIENT_ADDRESS_V4}/${PRIVATE_SUBNET_MASK_V4},${CLIENT_ADDRESS_V6}/${PRIVATE_SUBNET_MASK_V6}
+Address = ${CLIENT_ADDRESS_V4}/32,${CLIENT_ADDRESS_V6}/128
 DNS = ${CLIENT_DNS}
-ListenPort = ${PEER_PORT}
-MTU = ${PEER_MTU_CHOICE}
+${CLIENT_MTU_LINE}
 PrivateKey = ${CLIENT_PRIVKEY}
 [Peer]
 AllowedIPs = ${CLIENT_ALLOWED_IP}
@@ -1535,6 +1540,16 @@ PublicKey = ${SERVER_PUBKEY}" >>${WIREGUARD_CLIENT_PATH}/"${CLIENT_NAME}".conf
       if [ "${INSTALL_UNBOUND}" == true ]; then
         service unbound restart
       fi
+    fi
+    # Check that the tunnel actually came up.
+    if wg show "${WIREGUARD_PUB_NIC}" >/dev/null 2>&1; then
+      echo "WireGuard is running on ${WIREGUARD_PUB_NIC}."
+    else
+      echo "WARNING: WireGuard does not seem to be running on ${WIREGUARD_PUB_NIC}."
+      if [[ "${CURRENT_INIT_SYSTEM}" == *"systemd"* ]]; then
+        echo "Check it with: systemctl status wg-quick@${WIREGUARD_PUB_NIC} and journalctl -u wg-quick@${WIREGUARD_PUB_NIC}"
+      fi
+      echo "If you see \"Cannot find device ${WIREGUARD_PUB_NIC}\", the kernel was probably updated: reboot and run this script again."
     fi
     # Create a QR code for the client configuration for easy scanning
     qrencode -t ansiutf8 <${WIREGUARD_CLIENT_PATH}/"${CLIENT_NAME}".conf
@@ -1616,16 +1631,17 @@ else
         exit 1
       fi
       # Extract the last IPv4 address used in the WireGuard configuration file
-      LASTIPV4=$(grep "AllowedIPs" ${WIREGUARD_CONFIG} | cut --delimiter=" " --fields=3 | cut --delimiter="/" --fields=1 | cut --delimiter="." --fields=4 | tail --lines=1)
+      LASTIPV4=$(grep "AllowedIPs" ${WIREGUARD_CONFIG} | cut --delimiter=" " --fields=3 | cut --delimiter="/" --fields=1 | cut --delimiter="." --fields=4 | sort --numeric-sort | tail --lines=1)
       # Extract the last IPv6 address used in the WireGuard configuration file
-      LASTIPV6=$(grep "AllowedIPs" ${WIREGUARD_CONFIG} | cut --delimiter=" " --fields=3 | cut --delimiter="," --fields=2 | cut --delimiter="/" --fields=1 | cut --delimiter=":" --fields=5 | tail --lines=1)
+      LASTIPV6=$(grep "AllowedIPs" ${WIREGUARD_CONFIG} | cut --delimiter=" " --fields=3 | cut --delimiter="," --fields=2 | cut --delimiter="/" --fields=1 | cut --delimiter=":" --fields=5 | sort --numeric-sort | tail --lines=1)
       # If no IPv4 and IPv6 addresses are found in the configuration file, set the initial values to 1
       if { [ -z "${LASTIPV4}" ] && [ -z "${LASTIPV6}" ]; }; then
         LASTIPV4=1
         LASTIPV6=1
       fi
       # Find the smallest used IPv4 address in the WireGuard configuration file
-      SMALLEST_USED_IPV4=$(grep "AllowedIPs" ${WIREGUARD_CONFIG} | cut --delimiter=" " --fields=3 | cut --delimiter="/" --fields=1 | cut --delimiter="." --fields=4 | sort --numeric-sort | head --lines=1)
+      # Start the gap search at .2 (.1 is the server) so a freed .2 is reused too.
+      SMALLEST_USED_IPV4=2
       # Find the largest used IPv4 address in the WireGuard configuration file
       LARGEST_USED_IPV4=$(grep "AllowedIPs" ${WIREGUARD_CONFIG} | cut --delimiter=" " --fields=3 | cut --delimiter="/" --fields=1 | cut --delimiter="." --fields=4 | sort --numeric-sort | tail --lines=1)
       # Create a list of used IPv4 addresses in the WireGuard configuration file
@@ -1639,7 +1655,7 @@ else
         SMALLEST_USED_IPV4=$((SMALLEST_USED_IPV4 + 1))
       done
       # Find the smallest used IPv6 address in the WireGuard configuration file
-      SMALLEST_USED_IPV6=$(grep "AllowedIPs" ${WIREGUARD_CONFIG} | cut --delimiter=" " --fields=3 | cut --delimiter="," --fields=2 | cut --delimiter="/" --fields=1 | cut --delimiter=":" --fields=5 | sort --numeric-sort | head --lines=1)
+      SMALLEST_USED_IPV6=2
       # Find the largest used IPv6 address in the WireGuard configuration file
       LARGEST_USED_IPV6=$(grep "AllowedIPs" ${WIREGUARD_CONFIG} | cut --delimiter=" " --fields=3 | cut --delimiter="," --fields=2 | cut --delimiter="/" --fields=1 | cut --delimiter=":" --fields=5 | sort --numeric-sort | tail --lines=1)
       # Create a list of used IPv6 addresses in the WireGuard configuration file
@@ -1657,48 +1673,10 @@ else
         LASTIPV4=$(echo "${FIND_UNUSED_IPV4}" | head --lines=1)
         LASTIPV6=$(echo "${FIND_UNUSED_IPV6}" | head --lines=1)
       fi
-      if { [ "${LASTIPV4}" -ge 255 ] && [ "${LASTIPV6}" -ge 255 ]; }; then
-        # Get the current IPv4 and IPv6 ranges from the WireGuard config file
-        CURRENT_IPV4_RANGE=$(head --lines=1 ${WIREGUARD_CONFIG} | cut --delimiter=" " --fields=2)
-        CURRENT_IPV6_RANGE=$(head --lines=1 ${WIREGUARD_CONFIG} | cut --delimiter=" " --fields=3)
-        # Get the last octet of the IPv4 range and the fifth hextet of the IPv6 range
-        IPV4_BEFORE_BACKSLASH=$(echo "${CURRENT_IPV4_RANGE}" | cut --delimiter="/" --fields=1 | cut --delimiter="." --fields=4)
-        IPV6_BEFORE_BACKSLASH=$(echo "${CURRENT_IPV6_RANGE}" | cut --delimiter="/" --fields=1 | cut --delimiter=":" --fields=5)
-        # Get the second octet of the IPv4 range and the second hextet of the IPv6 range
-        IPV4_AFTER_FIRST=$(echo "${CURRENT_IPV4_RANGE}" | cut --delimiter="/" --fields=1 | cut --delimiter="." --fields=2)
-        IPV6_AFTER_FIRST=$(echo "${CURRENT_IPV6_RANGE}" | cut --delimiter="/" --fields=1 | cut --delimiter=":" --fields=2)
-        # Get the second and third octets of the IPv4 range and the third and fourth hextets of the IPv6 range
-        SECOND_IPV4_IN_RANGE=$(head --lines=1 ${WIREGUARD_CONFIG} | cut --delimiter=" " --fields=2 | cut --delimiter="/" --fields=1 | cut --delimiter="." --fields=2)
-        SECOND_IPV6_IN_RANGE=$(head --lines=1 ${WIREGUARD_CONFIG} | cut --delimiter=" " --fields=3 | cut --delimiter="/" --fields=1 | cut --delimiter=":" --fields=2)
-        THIRD_IPV4_IN_RANGE=$(head --lines=1 ${WIREGUARD_CONFIG} | cut --delimiter=" " --fields=2 | cut --delimiter="/" --fields=1 | cut --delimiter="." --fields=3)
-        THIRD_IPV6_IN_RANGE=$(head --lines=1 ${WIREGUARD_CONFIG} | cut --delimiter=" " --fields=3 | cut --delimiter="/" --fields=1 | cut --delimiter=":" --fields=3)
-        # Calculate the next IPv4 and IPv6 ranges
-        NEXT_IPV4_RANGE=$((THIRD_IPV4_IN_RANGE + 1))
-        NEXT_IPV6_RANGE=$((THIRD_IPV6_IN_RANGE + 1))
-        # Get the CIDR notation for the current IPv4 and IPv6 ranges
-        CURRENT_IPV4_RANGE_CIDR=$(head --lines=1 ${WIREGUARD_CONFIG} | cut --delimiter=" " --fields=2 | cut --delimiter="/" --fields=2)
-        CURRENT_IPV6_RANGE_CIDR=$(head --lines=1 ${WIREGUARD_CONFIG} | cut --delimiter=" " --fields=3 | cut --delimiter="/" --fields=2)
-        FINAL_IPV4_RANGE=$(echo "${CURRENT_IPV4_RANGE}" | cut --delimiter="/" --fields=1 | cut --delimiter="." --fields=1,2)".${NEXT_IPV4_RANGE}.${IPV4_BEFORE_BACKSLASH}/${CURRENT_IPV4_RANGE_CIDR}"
-        FINAL_IPV6_RANGE=$(echo "${CURRENT_IPV6_RANGE}" | cut --delimiter="/" --fields=1 | cut --delimiter=":" --fields=1,2)":${NEXT_IPV6_RANGE}::${IPV6_BEFORE_BACKSLASH}/${CURRENT_IPV6_RANGE_CIDR}"
-        if { [ "${THIRD_IPV4_IN_RANGE}" -ge 255 ] && [ "${THIRD_IPV6_IN_RANGE}" -ge 255 ]; }; then
-          if { [ "${SECOND_IPV4_IN_RANGE}" -ge 255 ] && [ "${SECOND_IPV6_IN_RANGE}" -ge 255 ] && [ "${THIRD_IPV4_IN_RANGE}" -ge 255 ] && [ "${THIRD_IPV6_IN_RANGE}" -ge 255 ] && [ "${LASTIPV4}" -ge 255 ] && [ "${LASTIPV6}" -ge 255 ]; }; then
-            # If all IP ranges are at their maximum value, then exit with an error message
-            echo "Error: You are unable to add any more peers."
-            exit
-          fi
-          # Calculate the next IPv4 and IPv6 ranges
-          NEXT_IPV4_RANGE=$((SECOND_IPV4_IN_RANGE + 1))
-          NEXT_IPV6_RANGE=$((SECOND_IPV6_IN_RANGE + 1))
-          # Calculate the final IPv4 and IPv6 ranges
-          FINAL_IPV4_RANGE=$(echo "${CURRENT_IPV4_RANGE}" | cut --delimiter="/" --fields=1 | cut --delimiter="." --fields=1)".${NEXT_IPV4_RANGE}.${IPV4_AFTER_FIRST}.${IPV4_BEFORE_BACKSLASH}/${CURRENT_IPV4_RANGE_CIDR}"
-          FINAL_IPV6_RANGE=$(echo "${CURRENT_IPV6_RANGE}" | cut --delimiter="/" --fields=1 | cut --delimiter=":" --fields=1)":${NEXT_IPV6_RANGE}:${IPV6_AFTER_FIRST}::${IPV6_BEFORE_BACKSLASH}/${CURRENT_IPV6_RANGE_CIDR}"
-        fi
-        # Replace the current IPv4 and IPv6 ranges with the final IPv4 and IPv6 ranges in the WireGuard config file
-        sed --in-place "1s|${CURRENT_IPV4_RANGE}|${FINAL_IPV4_RANGE}|" ${WIREGUARD_CONFIG}
-        sed --in-place "1s|${CURRENT_IPV6_RANGE}|${FINAL_IPV6_RANGE}|" ${WIREGUARD_CONFIG}
-        # Set LASTIPV4 and LASTIPV6 to their maximum values to indicate that no more peers can be added
-        LASTIPV4=1
-        LASTIPV6=1
+      # The /24 tunnel subnet holds .2 to .254; stop instead of handing out addresses outside it.
+      if [ -z "${FIND_UNUSED_IPV4}" ] && [ "${LASTIPV4}" -ge 254 ]; then
+        echo "Error: The tunnel subnet is full (253 peers). Remove a peer first."
+        exit 1
       fi
       # Generate a private key for the client
       CLIENT_PRIVKEY=$(wg genkey)
@@ -1706,8 +1684,6 @@ else
       CLIENT_PUBKEY=$(echo "${CLIENT_PRIVKEY}" | wg pubkey)
       # Generate a preshared key for the client and server to use
       PRESHARED_KEY=$(wg genpsk)
-      # Choose a random port number for the peer
-      PEER_PORT=$(shuf --input-range=1024-65535 --head-count=1)
       # Get the private subnet and subnet mask from the WireGuard config file
       PRIVATE_SUBNET_V4=$(head --lines=1 ${WIREGUARD_CONFIG} | cut --delimiter=" " --fields=2)
       PRIVATE_SUBNET_MASK_V4=$(echo "${PRIVATE_SUBNET_V4}" | cut --delimiter="/" --fields=2)
@@ -1745,13 +1721,18 @@ AllowedIPs = ${CLIENT_ADDRESS_V4}/32,${CLIENT_ADDRESS_V6}/128
       echo "${WIREGUARD_TEMP_NEW_CLIENT_INFO}" >>${WIREGUARD_CONFIG}
       # Remove the wireguard add peer config file
       rm --force ${WIREGUARD_ADD_PEER_CONFIG}
+      # Client MTU: only set when a custom value was chosen at install.
+      if [ "${MTU_CHOICE}" == "auto" ]; then
+        CLIENT_MTU_LINE="# MTU = 1420 (uncomment and lower, e.g. to 1280, only if large transfers stall)"
+      else
+        CLIENT_MTU_LINE="MTU = ${MTU_CHOICE}"
+      fi
       # Create the client configuration file
       echo "# ${WIREGUARD_WEBSITE_URL}
 [Interface]
-Address = ${CLIENT_ADDRESS_V4}/${PRIVATE_SUBNET_MASK_V4},${CLIENT_ADDRESS_V6}/${PRIVATE_SUBNET_MASK_V6}
+Address = ${CLIENT_ADDRESS_V4}/32,${CLIENT_ADDRESS_V6}/128
 DNS = ${CLIENT_DNS}
-ListenPort = ${PEER_PORT}
-MTU = ${MTU_CHOICE}
+${CLIENT_MTU_LINE}
 PrivateKey = ${CLIENT_PRIVKEY}
 [Peer]
 AllowedIPs = ${CLIENT_ALLOWED_IP}
@@ -2097,7 +2078,8 @@ PublicKey = ${SERVER_PUBKEY}" >>${WIREGUARD_CLIENT_PATH}/"${NEW_CLIENT_NAME}".co
       ;;
     13) # Change the wireguard interface's port number.
       # Extract the old server port from the WireGuard config file
-      OLD_SERVER_PORT=$(head --lines=1 ${WIREGUARD_CONFIG} | cut --delimiter=" " --fields=4 | cut --delimiter=":" --fields=2)
+      OLD_SERVER_ENDPOINT=$(head --lines=1 ${WIREGUARD_CONFIG} | cut --delimiter=" " --fields=4)
+      OLD_SERVER_PORT="${OLD_SERVER_ENDPOINT##*:}"
       # Prompt the user to enter a valid custom port (between 1 and 65535) and store it in NEW_SERVER_PORT
       until [[ "${NEW_SERVER_PORT}" =~ ^[0-9]+$ ]] && [ "${NEW_SERVER_PORT}" -ge 1 ] && [ "${NEW_SERVER_PORT}" -le 65535 ]; do
         read -rp "Enter a custom port number (between 1 and 65535): " -e -i 51820 NEW_SERVER_PORT
@@ -2109,8 +2091,18 @@ PublicKey = ${SERVER_PUBKEY}" >>${WIREGUARD_CLIENT_PATH}/"${NEW_CLIENT_NAME}".co
         exit
       fi
       # If the old server port is different from the new server port, update the server port in the WireGuard config file
+      if [ "${OLD_SERVER_PORT}" == "${NEW_SERVER_PORT}" ]; then
+        echo "The port is already ${NEW_SERVER_PORT}, nothing to change."
+        exit 0
+      fi
+      # Stop first so PostDown removes the firewall rule for the old port.
+      if [[ "${CURRENT_INIT_SYSTEM}" == *"systemd"* ]]; then
+        systemctl stop wg-quick@${WIREGUARD_PUB_NIC}
+      elif [[ "${CURRENT_INIT_SYSTEM}" == *"init"* ]]; then
+        service wg-quick@${WIREGUARD_PUB_NIC} stop
+      fi
       if [ "${OLD_SERVER_PORT}" != "${NEW_SERVER_PORT}" ]; then
-        sed --in-place "s/^ListenPort = ${OLD_SERVER_PORT}$/ListenPort = ${NEW_SERVER_PORT}/; 1s/:${OLD_SERVER_PORT} /:${NEW_SERVER_PORT} /" ${WIREGUARD_CONFIG}
+        sed --in-place "s/^ListenPort = ${OLD_SERVER_PORT}$/ListenPort = ${NEW_SERVER_PORT}/; 1s/:${OLD_SERVER_PORT} /:${NEW_SERVER_PORT} /; s/--dport ${OLD_SERVER_PORT} /--dport ${NEW_SERVER_PORT} /g" ${WIREGUARD_CONFIG}
         echo "The server port has changed from ${OLD_SERVER_PORT} to ${NEW_SERVER_PORT} in ${WIREGUARD_CONFIG}."
       fi
       # Create a list of existing WireGuard clients from the WireGuard config file
@@ -2129,11 +2121,11 @@ PublicKey = ${SERVER_PUBKEY}" >>${WIREGUARD_CLIENT_PATH}/"${NEW_CLIENT_NAME}".co
           echo "The server port has changed from ${OLD_SERVER_PORT} to ${NEW_SERVER_PORT} in ${WIREGUARD_CLIENT_PATH}/${CLIENT_NAME}.conf."
         fi
       done
-      # Apply the new ListenPort
+      # Bring the interface back up on the new port
       if [[ "${CURRENT_INIT_SYSTEM}" == *"systemd"* ]]; then
-        systemctl restart wg-quick@${WIREGUARD_PUB_NIC}
+        systemctl start wg-quick@${WIREGUARD_PUB_NIC}
       elif [[ "${CURRENT_INIT_SYSTEM}" == *"init"* ]]; then
-        service wg-quick@${WIREGUARD_PUB_NIC} restart
+        service wg-quick@${WIREGUARD_PUB_NIC} start
       fi
       ;;
     14) # Remove all the peers from the interface.

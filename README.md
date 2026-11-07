@@ -37,6 +37,15 @@ sudo CONTENT_BLOCKER_URL=https://raw.githubusercontent.com/StevenBlack/hosts/mas
 - Interface name overridable via `WIREGUARD_PUB_NIC`.
 - Peer changes reload with `wg syncconf` instead of `wg addconf`.
 
+**Tunnel and clients** (ideas from angristan/wireguard-install)
+- Default tunnel subnets are `10.66.66.0/24` and `fd42:42:42::0/64` instead of all of `10.0.0.0/8`, so they don't collide with Docker, home/work LANs or other tunnels. Room for 253 peers; adding one more stops with a clear error instead of the old "roll over" logic that handed out addresses outside the subnet.
+- Client configs use `Address = <ip>/32, <ip6>/128`. With the old `/8` a client lost access to any local network in the 10.x range.
+- Client configs no longer force `MTU = 1280` (each device uses WireGuard's default; a commented line explains when to lower it). A custom peer MTU chosen at install is still written.
+- Client configs no longer get a random `ListenPort`.
+- The listen port is opened in iptables/ip6tables `INPUT` in PostUp and closed in PostDown, so a DROP input policy or geoblock rules don't silently block clients. Changing the port (option 13) stops the interface first so the old rule is removed, then starts it on the new port.
+- After install the script checks the tunnel is actually up and tells you what to do if not (usually a reboot after a kernel update).
+- New peers take the lowest free address from `.2` up and never reuse one in use (the last line of `wg0.conf` was taken as the highest address, which broke after a gap was filled).
+
 **Server address**
 - Public IP detection checks the server's own interfaces first (Nyr-style). One public address is used directly; several give you a menu; only private/CGNAT addresses mean the server is behind NAT, and then the address found online is offered as an editable default, where a hostname works too. Outside lookups are validated, so an empty or garbage reply is never used.
 - The address you choose is actually used. Upstream ignored the custom/selected IP and always wrote the raw detection result into the endpoint.
