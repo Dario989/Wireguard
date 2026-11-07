@@ -583,7 +583,7 @@ if [ ! -f "${WIREGUARD_CONFIG}" ]; then
   function set-ipv4-subnet() {
     # Prompt the user for the desired IPv4 subnet
     echo "Please specify the IPv4 subnet you want to use for the WireGuard interface. This should be a private subnet that is not in use elsewhere on your network. For example, you might choose '10.0.0.0/24' if it's not already in use."
-    echo "  1) 10.66.66.0/24 (Recommended)"
+    echo "  1) 10.77.77.0/24 (Recommended)"
     echo "  2) Custom (Advanced)"
     # Keep prompting the user until they enter a valid subnet choice
     until [[ "${PRIVATE_SUBNET_V4_SETTINGS}" =~ ^[1-2]$ ]]; do
@@ -592,12 +592,12 @@ if [ ! -f "${WIREGUARD_CONFIG}" ]; then
     # Based on the user's choice, set the private IPv4 subnet
     case ${PRIVATE_SUBNET_V4_SETTINGS} in
     1)
-      PRIVATE_SUBNET_V4="10.66.66.0/24" # Set a default IPv4 subnet
+      PRIVATE_SUBNET_V4="10.77.77.0/24" # Set a default IPv4 subnet
       ;;
     2)
       read -rp "Custom IPv4 Subnet:" PRIVATE_SUBNET_V4 # Prompt user for custom subnet
       if [ -z "${PRIVATE_SUBNET_V4}" ]; then           # If the user did not enter a subnet, set default
-        PRIVATE_SUBNET_V4="10.66.66.0/24"
+        PRIVATE_SUBNET_V4="10.77.77.0/24"
       fi
       ;;
     esac
