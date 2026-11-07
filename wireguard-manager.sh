@@ -51,11 +51,39 @@ check_root
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # Peer names are used in sed ranges, file names and cron lines: keep them simple.
+# Max 15 characters: Linux clients use the file name (<peer>.conf) as the interface name, and
+# interface names are limited to 15 characters. A leading '-' would look like a command-line option.
+# Pass "existing" as the second argument for a peer that may predate the 15-character rule.
 function validate-peer-name() {
-  if [[ ! "${1}" =~ ^[A-Za-z0-9_-]+$ ]]; then
-    echo "Error: Invalid peer name '${1}'. Use letters, digits, '-' and '_' only."
+  if [ "${2}" == "existing" ] && [[ "${1}" =~ ^[A-Za-z0-9_][A-Za-z0-9_-]*$ ]]; then
+    return 0
+  fi
+  if [[ ! "${1}" =~ ^[A-Za-z0-9_][A-Za-z0-9_-]{0,14}$ ]]; then
+    echo "Error: Invalid peer name '${1}'. Use 1-15 letters, digits, '-' and '_' (not starting with '-')."
     exit 1
   fi
+}
+
+# Ask before destructive actions. -y/--yes answers for you; without a terminal it refuses.
+function confirm-action() {
+  local answer
+  if [ "${ASSUME_YES}" == true ]; then
+    return 0
+  fi
+  if [ ! -t 0 ]; then
+    echo "Error: ${1} needs confirmation. Run it in a terminal or add -y."
+    exit 1
+  fi
+  read -rp "${1} [y/N]: " answer
+  if [[ ! "${answer}" =~ ^[yY]([eE][sS])?$ ]]; then
+    echo "Aborted, nothing was changed."
+    exit 0
+  fi
+}
+
+# Delete a peer's expiry cron line (current "--remove <peer>" and old "echo -e ... |" format).
+function remove-peer-cron() {
+  crontab -l 2>/dev/null | grep --invert-match --extended-regexp -e "(echo -e \"${1}\" \||--remove ${1}$)" | crontab -
 }
 
 # Address checks used for public IP detection and DNS validation.
@@ -453,22 +481,28 @@ function get-network-information() {
 
 # Usage Guide of the application
 function usage-guide() {
-  echo "Usage: ./$(basename "${0}") <command>"
-  echo "  --install     Installs the WireGuard interface on your system"
-  echo "  --start       Starts the WireGuard interface if it's not already running"
-  echo "  --stop        Stops the WireGuard interface if it's currently running"
-  echo "  --restart     Restarts the WireGuard interface"
-  echo "  --list        Lists all the peers currently connected to the WireGuard interface"
-  echo "  --add         Adds a new peer to the WireGuard interface"
-  echo "  --remove      Removes a specified peer from the WireGuard interface"
-  echo "  --reinstall   Reinstalls the WireGuard interface, keeping the current configuration"
-  echo "  --uninstall   Uninstalls the WireGuard interface from your system"
-  echo "  --update      Updates the WireGuard Manager to the latest version"
-  echo "  --ddns        Updates the IP address of the WireGuard interface using Dynamic DNS"
-  echo "  --backup      Creates a backup of your current WireGuard configuration"
-  echo "  --restore     Restores the WireGuard configuration from a previous backup"
-  echo "  --purge       Removes all peers from the WireGuard interface"
-  echo "  --help        Displays this usage guide"
+  echo "Usage: ./$(basename "${0}") [command] [-y]"
+  echo "  --install              Installs the WireGuard interface on your system (headless, defaults)"
+  echo "  --start                Starts the WireGuard interface if it's not already running"
+  echo "  --stop                 Stops the WireGuard interface if it's currently running"
+  echo "  --restart              Restarts the WireGuard interface"
+  echo "  --list                 Lists all peers with their tunnel addresses"
+  echo "  --show                 Shows the live interface status (wg show)"
+  echo "  --add [NAME]           Adds a new peer (asks for a name if none is given)"
+  echo "  --remove [NAME]        Removes a peer (asks which one if none is given)"
+  echo "  --qr [NAME]            Shows the QR code and config path of a peer"
+  echo "  --reinstall            Reinstalls the WireGuard interface, keeping the current configuration"
+  echo "  --uninstall            Uninstalls WireGuard and removes all its files (asks first)"
+  echo "  --update               Updates the WireGuard Manager to the latest version"
+  echo "  --ddns                 Updates the IP address of the WireGuard interface using Dynamic DNS"
+  echo "  --backup               Creates a backup of your current WireGuard configuration"
+  echo "  --restore              Restores the WireGuard configuration from a previous backup"
+  echo "  --purge                Removes all peers from the WireGuard interface (asks first)"
+  echo "  -y, --yes              Answers yes to confirmation questions (for scripts and cron)"
+  echo "  --help                 Displays this usage guide"
+  echo ""
+  echo "Peer names: 1-15 letters, digits, '-' or '_'."
+  echo "Examples: $(basename "${0}") --add phone | --remove phone | --qr phone | --purge -y"
 }
 
 # Define a function that takes command line arguments as input
@@ -493,17 +527,41 @@ function usage() {
       shift
       WIREGUARD_OPTIONS=${WIREGUARD_OPTIONS=4}
       ;;
-    --list) # If it's "--list", set the variable WIREGUARD_OPTIONS to 1
+    --list | --listclients) # List peers by name and address
+      shift
+      WIREGUARD_OPTIONS=${WIREGUARD_OPTIONS=17}
+      ;;
+    --show) # Live interface status (wg show)
       shift
       WIREGUARD_OPTIONS=${WIREGUARD_OPTIONS=1}
       ;;
-    --add) # If it's "--add", set the variable WIREGUARD_OPTIONS to 5
+    --add | --addclient) # Add a peer, optionally with its name: --add phone
       shift
       WIREGUARD_OPTIONS=${WIREGUARD_OPTIONS=5}
+      if [ -n "${1}" ] && [[ "${1}" != -* ]]; then
+        NEW_CLIENT_NAME="${1}"
+        shift
+      fi
       ;;
-    --remove) # If it's "--remove", set the variable WIREGUARD_OPTIONS to 6
+    --remove | --removeclient) # Remove a peer, optionally by name: --remove phone
       shift
       WIREGUARD_OPTIONS=${WIREGUARD_OPTIONS=6}
+      if [ -n "${1}" ] && [[ "${1}" != -* ]]; then
+        REMOVECLIENT="${1}"
+        shift
+      fi
+      ;;
+    --qr | --showclientqr) # Show a peer's QR code, optionally by name: --qr phone
+      shift
+      WIREGUARD_OPTIONS=${WIREGUARD_OPTIONS=15}
+      if [ -n "${1}" ] && [[ "${1}" != -* ]]; then
+        VIEW_CLIENT_INFO="${1}"
+        shift
+      fi
+      ;;
+    -y | --yes) # Answer yes to confirmations
+      shift
+      ASSUME_YES=true
       ;;
     --reinstall) # If it's "--reinstall", set the variable WIREGUARD_OPTIONS to 7
       shift
@@ -1525,7 +1583,7 @@ PublicKey = ${SERVER_PUBKEY}" >>${WIREGUARD_CLIENT_PATH}/"${CLIENT_NAME}".conf
     if [ "${AUTOMATIC_WIREGUARD_EXPIRATION}" == true ]; then
       crontab -l 2>/dev/null | {
         cat
-        echo "$(date +%M) $(date +%H) $(date +%d) $(date +%m) * echo -e \"${CLIENT_NAME}\" | ${CURRENT_FILE_PATH} --remove"
+        echo "$(date +%M) $(date +%H) $(date +%d) $(date +%m) * ${CURRENT_FILE_PATH} --remove ${CLIENT_NAME}"
       } | crontab -
     fi
     # Initiate and set the necessary services to run at startup, depending on the init system (either systemd or init)
@@ -1574,6 +1632,11 @@ else
     done
   fi
 
+  # Older versions scheduled expiry as: echo -e "<peer>" | <script> --remove. Rewrite to --remove <peer>.
+  if crontab -l 2>/dev/null | grep --quiet 'echo -e ".*" | .* --remove$'; then
+    crontab -l 2>/dev/null | sed --regexp-extended 's#echo -e "([A-Za-z0-9_-]+)" \| (.*) --remove$#\2 --remove \1#' | crontab -
+  fi
+
   # What to do if the software is already installed?
   function wireguard-next-questions-interface() {
     echo "Please select an action:"
@@ -1593,8 +1656,9 @@ else
     echo "   14) Purge all WireGuard peers"
     echo "   15) Generate a QR code for WireGuard configuration"
     echo "   16) Verify WireGuard configurations"
-    until [[ "${WIREGUARD_OPTIONS}" =~ ^[0-9]+$ ]] && [ "${WIREGUARD_OPTIONS}" -ge 1 ] && [ "${WIREGUARD_OPTIONS}" -le 16 ]; do
-      read -rp "Select an Option [1-16]:" -e -i 0 WIREGUARD_OPTIONS
+    echo "   17) List peers"
+    until [[ "${WIREGUARD_OPTIONS}" =~ ^[0-9]+$ ]] && [ "${WIREGUARD_OPTIONS}" -ge 1 ] && [ "${WIREGUARD_OPTIONS}" -le 17 ]; do
+      read -rp "Select an Option [1-17]:" -e -i 0 WIREGUARD_OPTIONS
     done
     case ${WIREGUARD_OPTIONS} in
     1) # Display WireGuard configuration
@@ -1747,7 +1811,7 @@ PublicKey = ${SERVER_PUBKEY}" >>${WIREGUARD_CLIENT_PATH}/"${NEW_CLIENT_NAME}".co
         crontab -l 2>/dev/null | {
           cat
           # Add a new cron job to remove the new client at the specified expiration date
-          echo "$(date +%M) $(date +%H) $(date +%d) $(date +%m) * echo -e \"${NEW_CLIENT_NAME}\" | ${CURRENT_FILE_PATH} --remove"
+          echo "$(date +%M) $(date +%H) $(date +%d) $(date +%m) * ${CURRENT_FILE_PATH} --remove ${NEW_CLIENT_NAME}"
         } | crontab -
       fi
       # Generate and display a QR code for the new client configuration
@@ -1758,16 +1822,21 @@ PublicKey = ${SERVER_PUBKEY}" >>${WIREGUARD_CLIENT_PATH}/"${NEW_CLIENT_NAME}".co
       echo "Client config --> ${WIREGUARD_CLIENT_PATH}/${NEW_CLIENT_NAME}.conf"
       ;;
     6) # Remove WireGuard Peer
-      # Prompt the user to choose a WireGuard peer to remove
-      echo "Which WireGuard peer would you like to remove?"
-      # List all the peers' names in the WireGuard configuration file
-      grep start ${WIREGUARD_CONFIG} | cut --delimiter=" " --fields=2
-      # Read the user input for the peer's name
-      read -rp "Peer's name:" REMOVECLIENT
-      validate-peer-name "${REMOVECLIENT}"
+      # Name given on the command line (--remove phone) is used directly; otherwise ask.
+      if [ -z "${REMOVECLIENT}" ]; then
+        echo "Which WireGuard peer would you like to remove?"
+        grep start ${WIREGUARD_CONFIG} | cut --delimiter=" " --fields=2
+        read -rp "Peer's name:" REMOVECLIENT
+        REMOVE_PICKED_INTERACTIVELY=true
+      fi
+      validate-peer-name "${REMOVECLIENT}" existing
       if ! grep -q "^# ${REMOVECLIENT} start$" "${WIREGUARD_CONFIG}"; then
         echo "Error: No peer named ${REMOVECLIENT} found."
         exit 1
+      fi
+      # Confirm only when picked from the prompt in a terminal (old cron lines pipe the name in).
+      if [ "${REMOVE_PICKED_INTERACTIVELY}" == true ] && [ -t 0 ]; then
+        confirm-action "Remove peer ${REMOVECLIENT}?"
       fi
       # Extract the public key of the selected peer from the configuration file
       CLIENTKEY=$(sed -n "/\# ${REMOVECLIENT} start/,/\# ${REMOVECLIENT} end/p" ${WIREGUARD_CONFIG} | grep PublicKey | cut --delimiter=" " --fields=3)
@@ -1782,7 +1851,8 @@ PublicKey = ${SERVER_PUBKEY}" >>${WIREGUARD_CLIENT_PATH}/"${NEW_CLIENT_NAME}".co
       # Reload the WireGuard interface configuration to apply the changes
       wg syncconf ${WIREGUARD_PUB_NIC} <(wg-quick strip ${WIREGUARD_PUB_NIC})
       # Remove any cronjobs associated with the removed peer
-      crontab -l 2>/dev/null | grep --invert-match --fixed-strings "echo -e \"${REMOVECLIENT}\" |" | crontab -
+      remove-peer-cron "${REMOVECLIENT}"
+      echo "Peer ${REMOVECLIENT} removed."
       ;;
     7) # Reinstall WireGuard
       # Check if the current init system is systemd, and if so, disable and stop the WireGuard service
@@ -1817,6 +1887,7 @@ PublicKey = ${SERVER_PUBKEY}" >>${WIREGUARD_CLIENT_PATH}/"${NEW_CLIENT_NAME}".co
       fi
       ;;
     8) # Uninstall WireGuard and purging files
+      confirm-action "Uninstall WireGuard and delete all configs, peers and backups?"
       # Check if the current init system is systemd and disable the WireGuard service
       if [[ "${CURRENT_INIT_SYSTEM}" == *"systemd"* ]]; then
         systemctl disable --now wg-quick@${WIREGUARD_PUB_NIC}
@@ -2130,6 +2201,11 @@ PublicKey = ${SERVER_PUBKEY}" >>${WIREGUARD_CLIENT_PATH}/"${NEW_CLIENT_NAME}".co
       ;;
     14) # Remove all the peers from the interface.
       COMPLETE_CLIENT_LIST=$(grep start ${WIREGUARD_CONFIG} | cut --delimiter=" " --fields=2)
+      if [ -z "${COMPLETE_CLIENT_LIST}" ]; then
+        echo "No peers configured."
+        exit 0
+      fi
+      confirm-action "Remove all $(wc --words <<<"${COMPLETE_CLIENT_LIST}") peers?"
       # This line gets the list of clients in the config file by searching for the string "start" and then extracting the second field (the client name) from each line.
       for CLIENT_LIST_ARRAY in ${COMPLETE_CLIENT_LIST}; do
         USER_LIST[ADD_CONTENT]=${CLIENT_LIST_ARRAY}
@@ -2151,17 +2227,18 @@ PublicKey = ${SERVER_PUBKEY}" >>${WIREGUARD_CLIENT_PATH}/"${NEW_CLIENT_NAME}".co
         # This line removes the client's config file from the server.
         wg syncconf ${WIREGUARD_PUB_NIC} <(wg-quick strip ${WIREGUARD_PUB_NIC})
         # This line removes the client's config from the running server.
-        crontab -l 2>/dev/null | grep --invert-match --fixed-strings "echo -e \"${CLIENT_NAME}\" |" | crontab -
+        remove-peer-cron "${CLIENT_NAME}"
         # This line removes the client from the cron job.
       done
       ;;
     15) # Generate a QR code for a WireGuard peer.
-      # Print a prompt asking the user to choose a WireGuard peer for generating a QR code
-      echo "Which WireGuard peer would you like to generate a QR code for?"
-      # Extract and display a list of peer names from the WireGuard config file
-      grep start ${WIREGUARD_CONFIG} | cut --delimiter=" " --fields=2
-      # Prompt the user to enter the desired peer's name and store it in the VIEW_CLIENT_INFO variable
-      read -rp "Enter the name of the peer you want to view information for: " VIEW_CLIENT_INFO
+      # Name given on the command line (--qr phone) is used directly; otherwise ask.
+      if [ -z "${VIEW_CLIENT_INFO}" ]; then
+        echo "Which WireGuard peer would you like to generate a QR code for?"
+        grep start ${WIREGUARD_CONFIG} | cut --delimiter=" " --fields=2
+        read -rp "Enter the name of the peer you want to view information for: " VIEW_CLIENT_INFO
+      fi
+      validate-peer-name "${VIEW_CLIENT_INFO}" existing
       # Check if the config file for the specified peer exists
       if [ -f "${WIREGUARD_CLIENT_PATH}/${VIEW_CLIENT_INFO}.conf" ]; then
         # Generate a QR code for the specified peer's config file and display it in the terminal
@@ -2203,6 +2280,14 @@ PublicKey = ${SERVER_PUBKEY}" >>${WIREGUARD_CLIENT_PATH}/"${NEW_CLIENT_NAME}".co
         fi
         echo "Your WireGuard interface is valid."
       fi
+      ;;
+    17) # List peers with their tunnel addresses
+      if ! grep --quiet '^# .* start$' "${WIREGUARD_CONFIG}"; then
+        echo "No peers configured."
+        exit 0
+      fi
+      printf '%-16s %-16s %s\n' "NAME" "IPV4" "IPV6"
+      awk '/^# .* start$/ { name = $2 } /^AllowedIPs/ && name != "" { split($3, a, ","); sub("/.*", "", a[1]); sub("/.*", "", a[2]); printf "%-16s %-16s %s\n", name, a[1], a[2]; name = "" }' "${WIREGUARD_CONFIG}"
       ;;
     esac
   }

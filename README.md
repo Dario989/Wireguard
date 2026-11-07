@@ -22,6 +22,22 @@ Use your own blocklist (plain domains or hosts format):
 sudo CONTENT_BLOCKER_URL=https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts bash /usr/local/bin/wireguard-manager.sh
 ```
 
+## Command line
+
+```bash
+wireguard-manager.sh --add phone       # add a peer (asks for a name if omitted)
+wireguard-manager.sh --remove phone    # remove a peer
+wireguard-manager.sh --qr phone        # show a peer's QR code and config path
+wireguard-manager.sh --list            # list peers with their tunnel addresses
+wireguard-manager.sh --show            # live status (wg show)
+wireguard-manager.sh --purge -y        # remove all peers without asking
+wireguard-manager.sh --help            # all options
+```
+
+Peer names: 1–15 letters, digits, `-` or `_`. Linux clients use the file name (`phone.conf`) as the interface name, which is limited to 15 characters. Older, longer names can still be removed and shown.
+
+`--uninstall`, `--purge` and picking a peer to remove from the menu ask for confirmation; `-y` answers yes. Without a terminal (cron, scripts) they refuse unless `-y` is given.
+
 ## Changes from upstream
 
 **Safety**
@@ -65,6 +81,9 @@ sudo CONTENT_BLOCKER_URL=https://raw.githubusercontent.com/StevenBlack/hosts/mas
 - `access-control: ::0` → `::/0`.
 
 **Peers**
+- Command-line options take the peer name directly (`--add NAME`, `--remove NAME`, `--qr NAME`), plus `--list` (names and addresses), `--show` (`wg show`) and `-y`. hwdsl2-style aliases `--addclient`, `--removeclient`, `--showclientqr` and `--listclients` work too. Expiry cron jobs now run `--remove NAME`; existing `echo -e "NAME" | ... --remove` lines are rewritten automatically.
+- Peer names are limited to 15 characters (Linux interface-name limit) and can't start with `-`.
+- Uninstall and purge ask for confirmation.
 - Client configs are saved as `/etc/wireguard/clients/<peer>.conf` instead of `<peer>-wg0.conf`. Files from older versions are renamed automatically on the next run. A non-default interface (`WIREGUARD_PUB_NIC=wg1`) uses its own folder, `clients-wg1/`, so peer names can't collide.
 - Default peer names are `peer1`, `peer2`, ... (next free number) instead of a random 50-character hex string.
 
