@@ -514,7 +514,7 @@ function headless-install() {
     CLIENT_ALLOWED_IP_SETTINGS=${CLIENT_ALLOWED_IP_SETTINGS=1} # Default to 1 if not specified
     AUTOMATIC_UPDATES_SETTINGS=${AUTOMATIC_UPDATES_SETTINGS=2} # Default to 2 (off) if not specified
     AUTOMATIC_BACKUP_SETTINGS=${AUTOMATIC_BACKUP_SETTINGS=1}   # Default to 1 if not specified
-    DNS_PROVIDER_SETTINGS=${DNS_PROVIDER_SETTINGS=1}           # Default to 1 if not specified
+    DNS_PROVIDER_SETTINGS=${DNS_PROVIDER_SETTINGS=1}           # Default to 1 (Cloudflare) if not specified
     CONTENT_BLOCKER_SETTINGS=${CONTENT_BLOCKER_SETTINGS=1}     # Default to 1 if not specified
     CLIENT_NAME=${CLIENT_NAME=$(next-peer-name)}              # Default peer1, peer2, ... if not specified
     AUTOMATIC_CONFIG_REMOVER=${AUTOMATIC_CONFIG_REMOVER=1}     # Default to 1 if not specified
@@ -960,133 +960,88 @@ if [ ! -f "${WIREGUARD_CONFIG}" ]; then
   # Invoke the function to configure automatic backup
   enable-automatic-backup
 
-  # Function to prompt the user for their preferred DNS provider.
+  # Function to choose the DNS server the WireGuard clients will use.
+  # Public resolvers come first; Unbound (a local recursive resolver that also takes over
+  # the server's own /etc/resolv.conf and port 53) is the last, advanced option.
   function ask-install-dns() {
-    # Display the DNS provider options to the user.
-    echo "Which DNS provider would you like to use?"
-    echo "  1) Unbound (Recommended)"
-    echo "  2) Custom (Advanced)"
-    # Continue prompting until the user enters a valid choice (1 or 2).
-    until [[ "${DNS_PROVIDER_SETTINGS}" =~ ^[1-2]$ ]]; do
-      # Read the user's DNS provider choice and store it in DNS_PROVIDER_SETTINGS.
-      read -rp "DNS provider [1-2]:" -e -i 1 DNS_PROVIDER_SETTINGS
+    echo "Which DNS server should the WireGuard clients use?"
+    echo "  1) Cloudflare (Recommended)"
+    echo "  2) AdGuard (blocks ads)"
+    echo "  3) NextDNS"
+    echo "  4) OpenDNS"
+    echo "  5) Google"
+    echo "  6) Verisign"
+    echo "  7) Quad9 (blocks malware)"
+    echo "  8) FDN"
+    echo "  9) Custom (Advanced)"
+    echo "  10) Unbound on this server (Advanced: replaces the server's own DNS, optional content-blocker)"
+    DNS_PROVIDER_MAX=10
+    # If Pi-Hole is installed, add it as an option.
+    if [ -x "$(command -v pihole)" ]; then
+      echo "  11) Pi-Hole on this server (Advanced)"
+      DNS_PROVIDER_MAX=11
+    fi
+    until [[ "${DNS_PROVIDER_SETTINGS}" =~ ^[0-9]+$ ]] && [ "${DNS_PROVIDER_SETTINGS}" -ge 1 ] && [ "${DNS_PROVIDER_SETTINGS}" -le "${DNS_PROVIDER_MAX}" ]; do
+      read -rp "DNS [1-${DNS_PROVIDER_MAX}]:" -e -i 1 DNS_PROVIDER_SETTINGS
     done
-    # Set variables based on the user's DNS provider choice.
     case ${DNS_PROVIDER_SETTINGS} in
     1)
-      # If the user chose Unbound, set INSTALL_UNBOUND to true.
+      CLIENT_DNS="1.1.1.1,1.0.0.1,2606:4700:4700::1111,2606:4700:4700::1001"
+      ;;
+    2)
+      CLIENT_DNS="94.140.14.14,94.140.15.15,2a10:50c0::ad1:ff,2a10:50c0::ad2:ff"
+      ;;
+    3)
+      CLIENT_DNS="45.90.28.167,45.90.30.167,2a07:a8c0::12:cf53,2a07:a8c1::12:cf53"
+      ;;
+    4)
+      CLIENT_DNS="208.67.222.222,208.67.220.220,2620:119:35::35,2620:119:53::53"
+      ;;
+    5)
+      CLIENT_DNS="8.8.8.8,8.8.4.4,2001:4860:4860::8888,2001:4860:4860::8844"
+      ;;
+    6)
+      CLIENT_DNS="64.6.64.6,64.6.65.6,2620:74:1b::1:1,2620:74:1c::2:2"
+      ;;
+    7)
+      CLIENT_DNS="9.9.9.9,149.112.112.112,2620:fe::fe,2620:fe::9"
+      ;;
+    8)
+      CLIENT_DNS="80.67.169.40,80.67.169.12,2001:910:800::40,2001:910:800::12"
+      ;;
+    9)
+      read -rp "Custom DNS (comma separated):" CLIENT_DNS
+      # If the user doesn't provide a custom DNS, default to Cloudflare.
+      if [ -z "${CLIENT_DNS}" ]; then
+        CLIENT_DNS="1.1.1.1,1.0.0.1,2606:4700:4700::1111,2606:4700:4700::1001"
+      fi
+      ;;
+    10)
+      # Unbound sets CLIENT_DNS to the tunnel gateway itself during install-unbound.
       INSTALL_UNBOUND=true
-      # Ask the user if they want to install a content-blocker.
       echo "Do you want to prevent advertisements, tracking, malware, and phishing using the content-blocker?"
       echo "  1) Yes (Recommended)"
       echo "  2) No"
-      # Continue prompting until the user enters a valid choice (1 or 2).
       until [[ "${CONTENT_BLOCKER_SETTINGS}" =~ ^[1-2]$ ]]; do
-        # Read the user's content blocker choice and store it in CONTENT_BLOCKER_SETTINGS.
         read -rp "Content Blocker Choice [1-2]:" -e -i 1 CONTENT_BLOCKER_SETTINGS
       done
-      # Set INSTALL_BLOCK_LIST based on the user's content blocker choice.
       case ${CONTENT_BLOCKER_SETTINGS} in
       1)
-        # If the user chose to install the content blocker, set INSTALL_BLOCK_LIST to true.
         INSTALL_BLOCK_LIST=true
         ;;
       2)
-        # If the user chose not to install the content blocker, set INSTALL_BLOCK_LIST to false.
         INSTALL_BLOCK_LIST=false
         ;;
       esac
       ;;
-    2)
-      # If the user chose to use a custom DNS provider, set CUSTOM_DNS to true.
-      CUSTOM_DNS=true
+    11)
+      CLIENT_DNS="${GATEWAY_ADDRESS_V4},${GATEWAY_ADDRESS_V6}"
       ;;
     esac
   }
 
   # Invoke the ask-install-dns function to begin the DNS provider selection process.
   ask-install-dns
-
-  # Function to allow users to select a custom DNS provider.
-  function custom-dns() {
-    # If the custom DNS option is enabled, proceed with the DNS selection.
-    if [ "${CUSTOM_DNS}" == true ]; then
-      # Present the user with a list of DNS providers to choose from.
-      echo "Select the DNS provider you wish to use with your WireGuard connection:"
-      echo "  1) Cloudflare (Recommended)"
-      echo "  2) AdGuard"
-      echo "  3) NextDNS"
-      echo "  4) OpenDNS"
-      echo "  5) Google"
-      echo "  6) Verisign"
-      echo "  7) Quad9"
-      echo "  8) FDN"
-      echo "  9) Custom (Advanced)"
-      # If Pi-Hole is installed, add it as an option.
-      if [ -x "$(command -v pihole)" ]; then
-        echo "  10) Pi-Hole (Advanced)"
-      fi
-      # Prompt the user to make a selection from the list of DNS providers.
-      until [[ "${CLIENT_DNS_SETTINGS}" =~ ^[0-9]+$ ]] && [ "${CLIENT_DNS_SETTINGS}" -ge 1 ] && [ "${CLIENT_DNS_SETTINGS}" -le 10 ]; do
-        read -rp "DNS [1-10]:" -e -i 1 CLIENT_DNS_SETTINGS
-      done
-      # Based on the user's selection, set the DNS addresses.
-      case ${CLIENT_DNS_SETTINGS} in
-      1)
-        # Set DNS addresses for Cloudflare.
-        CLIENT_DNS="1.1.1.1,1.0.0.1,2606:4700:4700::1111,2606:4700:4700::1001"
-        ;;
-      2)
-        # Set DNS addresses for AdGuard.
-        CLIENT_DNS="94.140.14.14,94.140.15.15,2a10:50c0::ad1:ff,2a10:50c0::ad2:ff"
-        ;;
-      3)
-        # Set DNS addresses for NextDNS.
-        CLIENT_DNS="45.90.28.167,45.90.30.167,2a07:a8c0::12:cf53,2a07:a8c1::12:cf53"
-        ;;
-      4)
-        # Set DNS addresses for OpenDNS.
-        CLIENT_DNS="208.67.222.222,208.67.220.220,2620:119:35::35,2620:119:53::53"
-        ;;
-      5)
-        # Set DNS addresses for Google.
-        CLIENT_DNS="8.8.8.8,8.8.4.4,2001:4860:4860::8888,2001:4860:4860::8844"
-        ;;
-      6)
-        # Set DNS addresses for Verisign.
-        CLIENT_DNS="64.6.64.6,64.6.65.6,2620:74:1b::1:1,2620:74:1c::2:2"
-        ;;
-      7)
-        # Set DNS addresses for Quad9.
-        CLIENT_DNS="9.9.9.9,149.112.112.112,2620:fe::fe,2620:fe::9"
-        ;;
-      8)
-        # Set DNS addresses for FDN.
-        CLIENT_DNS="80.67.169.40,80.67.169.12,2001:910:800::40,2001:910:800::12"
-        ;;
-      9)
-        # Prompt the user to enter a custom DNS address.
-        read -rp "Custom DNS:" CLIENT_DNS
-        # If the user doesn't provide a custom DNS, default to Google's DNS.
-        if [ -z "${CLIENT_DNS}" ]; then
-          CLIENT_DNS="8.8.8.8,8.8.4.4,2001:4860:4860::8888,2001:4860:4860::8844"
-        fi
-        ;;
-      10)
-        # If Pi-Hole is installed, use its DNS. Otherwise, install Unbound and enable the block list.
-        if [ -x "$(command -v pihole)" ]; then
-          CLIENT_DNS="${GATEWAY_ADDRESS_V4},${GATEWAY_ADDRESS_V6}"
-        else
-          INSTALL_UNBOUND=true
-          INSTALL_BLOCK_LIST=true
-        fi
-        ;;
-      esac
-    fi
-  }
-
-  # Invoke the custom-dns function to allow the user to select a DNS provider.
-  custom-dns
 
   # Function to prompt for the name of the first WireGuard peer.
   function client-name() {

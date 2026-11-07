@@ -37,6 +37,10 @@ sudo CONTENT_BLOCKER_URL=https://raw.githubusercontent.com/StevenBlack/hosts/mas
 - Interface name overridable via `WIREGUARD_PUB_NIC`.
 - Peer changes reload with `wg syncconf` instead of `wg addconf`.
 
+**DNS**
+- One DNS menu instead of two: public resolvers first (1 Cloudflare, default; 2 AdGuard; 3 NextDNS; 4 OpenDNS; 5 Google; 6 Verisign; 7 Quad9; 8 FDN; 9 Custom), then 10 Unbound on the server (optional content-blocker) and 11 Pi-Hole if installed. Upstream defaulted to Unbound, which takes over the host's `/etc/resolv.conf` and port 53.
+- Headless installs default to Cloudflare. Set `DNS_PROVIDER_SETTINGS=10` for Unbound.
+
 **Unbound**
 - Root hints and blocklist download to a temp file with `curl --fail` and only replace the live file on success; a failed blocklist update is rolled back if `unbound-checkconf` fails, and Unbound is only restarted on a valid config.
 - Root hints and blocklist no longer come from a random mirror (5 picks per run, including third-party CDNs like statically.io and combinatronics.io). Sources are tried in a fixed order with fallback: root hints use the distro copy (`/usr/share/dns/root.hints`, Debian/Ubuntu `dns-root-data`) first, then IANA's `internic.net`, then GitHub; the blocklist uses GitHub raw, then jsDelivr. Root hints must list the root servers to be accepted, and each file is downloaded once per update instead of twice.
