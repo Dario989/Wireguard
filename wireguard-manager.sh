@@ -512,6 +512,8 @@ CURRENT_FILE_PATH=$(realpath "${0}")
 WIREGUARD_WEBSITE_URL="https://www.wireguard.com"
 # Assigns a path for WireGuard
 WIREGUARD_PATH="/etc/wireguard"
+# Assigns a public network interface name for WireGuard (must be set before the paths below use it)
+WIREGUARD_PUB_NIC="${WIREGUARD_PUB_NIC:-wg0}"
 # Assigns a path for WireGuard clients
 # Client configs are named <peer>.conf; a non-default interface gets its own folder so names can't collide
 if [ "${WIREGUARD_PUB_NIC}" == "wg0" ]; then
@@ -519,8 +521,6 @@ if [ "${WIREGUARD_PUB_NIC}" == "wg0" ]; then
 else
   WIREGUARD_CLIENT_PATH="${WIREGUARD_PATH}/clients-${WIREGUARD_PUB_NIC}"
 fi
-# Assigns a public network interface name for WireGuard
-WIREGUARD_PUB_NIC="${WIREGUARD_PUB_NIC:-wg0}"
 # Assigns a path for the WireGuard configuration file
 WIREGUARD_CONFIG="${WIREGUARD_PATH}/${WIREGUARD_PUB_NIC}.conf"
 # Assigns a path for the WireGuard additional peer configuration file
